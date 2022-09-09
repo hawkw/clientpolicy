@@ -2,6 +2,9 @@ use anyhow::Result;
 use clap::Parser;
 use std::net::SocketAddr;
 
+mod index;
+use index::Index;
+
 #[derive(Parser)]
 #[clap(name = "client-policy", version)]
 struct Args {
@@ -37,14 +40,20 @@ async fn main() -> Result<()> {
         grpc_addr,
     } = Args::parse();
 
-    let rt = kubert::Runtime::builder()
+    let mut rt = kubert::Runtime::builder()
         .with_log(log_level, log_format)
         .with_admin(admin)
         .with_client(client)
         .build()
         .await?;
 
+    let index = Index::default();
+    index.index_pods(&mut rt);
+
     tracing::info!(%grpc_addr, "serving ClientPolicy gRPC API");
+
+    // Run the Kubert indexers.
+    rt.run().await?;
 
     Ok(())
 }
