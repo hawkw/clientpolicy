@@ -122,9 +122,27 @@ impl Index {
                 interval.tick().await;
                 let index = index.read();
                 if index.changed >= last_changed {
-                    tracing::debug!(?index.changed, "dumping index");
-                    tracing::debug!(namespaces = ?format_args!("{:#?}", index.namespaces));
-                    tracing::debug!(servers = ?format_args!("{:#?}", index.servers_by_addr));
+                    use comfy_table::{presets::UTF8_FULL, *};
+                    let mut srvs_by_addr = Table::new();
+                    srvs_by_addr
+                        .load_preset(UTF8_FULL)
+                        .set_content_arrangement(ContentArrangement::Dynamic)
+                        .set_width(80)
+                        .set_header(Row::from(vec!["ADDRESS", "SERVER", "KIND", "PROTOCOL"]));
+                    for (addr, srv) in &index.servers_by_addr {
+                        let srv = srv.borrow();
+                        let (name, kind) = match srv.reference {
+                            core::ServerRef::Server(ref name) => (name.as_str(), "server"),
+                            core::ServerRef::Default(name) => (name, "default"),
+                        };
+                        srvs_by_addr.add_row(Row::from(vec![
+                            Cell::new(&addr.to_string()),
+                            Cell::new(name),
+                            Cell::new(kind),
+                            Cell::new(&format!("{:?}", srv.protocol)),
+                        ]));
+                    }
+                    println!("{srvs_by_addr}");
                     last_changed = index.changed;
                 }
             }
