@@ -154,26 +154,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "client-policy-controller"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "anyhow",
- "chrono",
- "clap",
- "futures",
- "ipnet",
- "k8s-openapi",
- "kube",
- "kubert",
- "linkerd-policy-controller-core",
- "linkerd-policy-controller-k8s-api",
- "parking_lot",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "core-foundation"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -820,6 +800,26 @@ name = "linked-hash-map"
 version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0717cef1bc8b636c6e1c1bbdefc09e6322da8a9321966e8928ef80d20f7f770f"
+
+[[package]]
+name = "linkerd-client-policy"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "chrono",
+ "clap",
+ "futures",
+ "ipnet",
+ "k8s-openapi",
+ "kube",
+ "kubert",
+ "linkerd-policy-controller-core",
+ "linkerd-policy-controller-k8s-api",
+ "parking_lot",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "linkerd-policy-controller-core"

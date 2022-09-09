@@ -29,7 +29,7 @@ struct Args {
     #[clap(
         long,
         env = "LINKERD_CLIENT_POLICY_CONTROLLER_LOG",
-        default_value = "info"
+        default_value = "info,linkerd=debug"
     )]
     log_level: kubert::LogFilter,
 
