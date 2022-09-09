@@ -73,6 +73,7 @@ spec:
         args:
         - --admin-addr=0.0.0.0:9991
         - --grpc-addr=0.0.0.0:8091
+        - --dump-interval-secs=5
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
