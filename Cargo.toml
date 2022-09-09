@@ -17,7 +17,7 @@ tracing = "0.1"
 [dependencies.kube]
 version = "0.74"
 default-features = false
-features = ["admission", "derive"]
+features = ["admission", "derive", "native-tls"]
 
 [dependencies.kubert]
 version = "0.9"
