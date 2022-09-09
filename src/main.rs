@@ -7,6 +7,7 @@ use clap::Parser;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+mod defaults;
 pub mod index;
 mod pod;
 mod route;
@@ -20,6 +21,8 @@ pub struct ClusterInfo {
 
     /// The networks that probes are expected to be from.
     pub probe_networks: Vec<IpNet>,
+
+    pub default_policy: defaults::DefaultPolicy,
 }
 
 #[derive(Parser)]
@@ -50,6 +53,9 @@ struct Args {
     #[clap(long)]
     probe_networks: Option<IpNets>,
 
+    #[clap(long, default_value = "all-unauthenticated")]
+    default_policy: defaults::DefaultPolicy,
+
     /// Dump the current state of the index every `dump_interval_secs`, if
     /// enabled.
     #[clap(long)]
@@ -67,6 +73,7 @@ async fn main() -> Result<()> {
         grpc_addr,
         probe_networks,
         dump_interval_secs,
+        default_policy,
     } = Args::parse();
 
     let mut rt = kubert::Runtime::builder()
@@ -80,6 +87,7 @@ async fn main() -> Result<()> {
     let index = Index::new(ClusterInfo {
         probe_networks,
         default_detect_timeout: DETECT_TIMEOUT,
+        default_policy,
     });
 
     index.index_pods(&mut rt);

@@ -48,7 +48,7 @@ struct Namespace {
 
 #[derive(Debug)]
 struct Pod {
-    labels: k8s::Labels,
+    meta: pod::Meta,
     ip: IpAddr,
     port_names: AHashMap<String, pod::PortSet>,
     port_servers: pod::PortMap<PodPortServer>,
@@ -334,7 +334,7 @@ impl Namespace {
             .as_ref()
             .map(pod::pod_http_probes)
             .unwrap_or_default();
-        let labels = pod.metadata.labels.unwrap_or_default().into();
+        let meta = pod::Meta::from_metadata(pod.metadata);
         let ip = pod
             .status
             .ok_or_else(|| anyhow::format_err!("pod has no status"))?
@@ -343,7 +343,7 @@ impl Namespace {
             .parse::<IpAddr>()?;
         let pod = match self.pods.entry(name.clone()) {
             Entry::Vacant(entry) => Some(entry.insert(Pod {
-                labels,
+                meta,
                 port_names,
                 port_servers: pod::PortMap::default(),
                 probes,
@@ -361,12 +361,12 @@ impl Namespace {
 
                 // If there aren't meaningful changes, then don't bother doing
                 // any more work.
-                if pod.labels == labels && ip == pod.ip {
+                if pod.meta == meta && ip == pod.ip {
                     tracing::debug!(pod = %name, "No changes");
                     None
                 } else {
                     tracing::debug!(pod = %name, "Updating");
-                    pod.labels = labels;
+                    pod.meta = meta;
                     pod.ip = ip;
                     Some(pod)
                 }
@@ -403,7 +403,7 @@ impl Pod {
         );
 
         for (srvname, server) in policies.servers.iter() {
-            if server.pod_selector.matches(&self.labels) {
+            if server.pod_selector.matches(&self.meta.labels) {
                 for port in self.select_ports(&server.port_ref).into_iter() {
                     // If the port is already matched to a server, then log a warning and skip
                     // updating it so it doesn't flap between servers.
@@ -439,11 +439,17 @@ impl Pod {
             }
         }
 
-        // TODO(eliza): do this
         // Reset all remaining ports to the default policy.
-        // for port in unmatched_ports.into_iter() {
-        //     self.set_default_server(port, &policy.cluster_info);
-        // }
+        for port in unmatched_ports.into_iter() {
+            let addr = SocketAddr::new(self.ip, port.into());
+            let rx = self.set_default_server(port, &policies.cluster_info);
+            match servers_by_addr.entry(addr) {
+                Entry::Occupied(entry) => assert!(rx.same_channel(entry.get())),
+                Entry::Vacant(entry) => {
+                    entry.insert(rx);
+                }
+            }
+        }
     }
 
     /// Enumerates ports.
@@ -518,6 +524,72 @@ impl Pod {
 
         tracing::debug!(port = %port, server = %name, "Updated server");
         rx
+    }
+
+    /// Updates a pod-port to use the given named server.
+    fn set_default_server(
+        &mut self,
+        port: NonZeroU16,
+        config: &ClusterInfo,
+    ) -> watch::Receiver<OutboundServer> {
+        let server = Self::default_outbound_server(
+            port,
+            &self.meta.settings,
+            self.probes
+                .get(&port)
+                .into_iter()
+                .flatten()
+                .map(|p| p.as_str()),
+            config,
+        );
+        match self.port_servers.entry(port) {
+            Entry::Vacant(entry) => {
+                tracing::debug!(%port, "Creating default server");
+                let (tx, rx) = watch::channel(server);
+                let rx2 = rx.clone();
+                entry.insert(PodPortServer { name: None, tx, rx });
+                rx2
+            }
+
+            Entry::Occupied(mut entry) => {
+                let ps = entry.get_mut();
+
+                // Avoid sending redundant updates.
+                if *ps.rx.borrow() == server {
+                    tracing::trace!(%port, "Default server already set");
+                    return ps.rx.clone();
+                }
+
+                tracing::debug!(%port, "Setting default server");
+                ps.name = None;
+                ps.tx.send(server).expect("a receiver is held by the index");
+                ps.rx.clone()
+            }
+        }
+    }
+
+    fn default_outbound_server<'p>(
+        port: NonZeroU16,
+        settings: &pod::Settings,
+        probe_paths: impl Iterator<Item = &'p str>,
+        config: &ClusterInfo,
+    ) -> OutboundServer {
+        let protocol = if settings.opaque_ports.contains(&port) {
+            core::ProxyProtocol::Opaque
+        } else {
+            core::ProxyProtocol::Detect {
+                timeout: config.default_detect_timeout,
+            }
+        };
+        let policy = settings.default_policy.unwrap_or(config.default_policy);
+
+        let http_routes = config.default_outbound_http_routes(probe_paths);
+
+        OutboundServer {
+            reference: core::ServerRef::Default(policy.as_str()),
+            protocol,
+            http_routes,
+        }
     }
 }
 
