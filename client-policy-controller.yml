@@ -1,0 +1,121 @@
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: linkerd-client-policy
+  namespace: linkerd
+  labels:
+    linkerd.io/control-plane-component: client-policy
+    linkerd.io/control-plane-ns: linkerd
+spec:
+  clusterIP: None
+  selector:
+    linkerd.io/control-plane-component: client-policy
+  ports:
+  - name: grpc
+    port: 8091
+    targetPort: 8091
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: client-policy
+    app.kubernetes.io/part-of: Linkerd
+    linkerd.io/control-plane-component: client-policy
+    linkerd.io/control-plane-ns: linkerd
+  name: linkerd-client-policy
+  namespace: linkerd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      linkerd.io/control-plane-component: client-policy
+      linkerd.io/control-plane-ns: linkerd
+      linkerd.io/proxy-deployment: linkerd-client-policy
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        linkerd.io/control-plane-component: client-policy
+        linkerd.io/control-plane-ns: linkerd
+        linkerd.io/proxy-deployment: linkerd-client-policy
+        linkerd.io/workload-ns: linkerd
+    spec:
+      serviceAccount: linkerd-destination
+      serviceAccountName: linkerd-destination
+      containers:
+      - name: client-policy
+        image: test.l5d.io/client-policy-controller:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8091
+          name: grpc
+          protocol: TCP
+        - containerPort: 9991
+          name: admin
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 7
+          httpGet:
+            path: /ready
+            port: admin
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        args:
+        - --admin-addr=0.0.0.0:9991
+        - --grpc-addr=0.0.0.0:8091
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: linkerd-client-policy
+  labels:
+    app.kubernetes.io/part-of: Linkerd
+    linkerd.io/control-plane-component: client-policy
+    linkerd.io/control-plane-ns: linkerd
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - policy.linkerd.io
+    resources:
+      - authorizationpolicies
+      - httproutes
+      - servers
+      # TODO(eliza): add client policy CRDs here when they exist
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: linkerd-client-policy
+  labels:
+    app.kubernetes.io/part-of: Linkerd
+    linkerd.io/control-plane-component: client-policy
+    linkerd.io/control-plane-ns: linkerd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: linkerd-client-policy
+subjects:
+  - kind: ServiceAccount
+    name: linkerd-destination
+    namespace: linkerd
