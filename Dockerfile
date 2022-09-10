@@ -8,6 +8,7 @@ ARG TARGETARCH
 ARG BUILD_TYPE="release"
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+COPY k8s k8s
 COPY src src
 RUN --mount=type=cache,target=target \
     --mount=type=cache,from=rust:1.63.0,source=/usr/local/cargo,target=/usr/local/cargo \
