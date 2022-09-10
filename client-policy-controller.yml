@@ -12,9 +12,9 @@ spec:
   selector:
     linkerd.io/control-plane-component: client-policy
   ports:
-  - name: grpc
-    port: 8091
-    targetPort: 8091
+    - name: grpc
+      port: 8091
+      targetPort: 8091
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -50,30 +50,30 @@ spec:
       serviceAccount: linkerd-destination
       serviceAccountName: linkerd-destination
       containers:
-      - name: client-policy
-        image: test.l5d.io/client-policy-controller:latest
-        imagePullPolicy: Never
-        ports:
-        - containerPort: 8091
-          name: grpc
-          protocol: TCP
-        - containerPort: 9991
-          name: admin
-          protocol: TCP
-        readinessProbe:
-          failureThreshold: 7
-          httpGet:
-            path: /ready
-            port: admin
-            scheme: HTTP
-          initialDelaySeconds: 10
-          periodSeconds: 10
-          successThreshold: 1
-          timeoutSeconds: 1
-        args:
-        - --admin-addr=0.0.0.0:9991
-        - --grpc-addr=0.0.0.0:8091
-        - --dump-interval-secs=5
+        - name: client-policy
+          image: test.l5d.io/client-policy-controller:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8091
+              name: grpc
+              protocol: TCP
+            - containerPort: 9991
+              name: admin
+              protocol: TCP
+          readinessProbe:
+            failureThreshold: 7
+            httpGet:
+              path: /ready
+              port: admin
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+          args:
+            - --admin-addr=0.0.0.0:9991
+            - --grpc-addr=0.0.0.0:8091
+            - --dump-interval-secs=5
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -96,9 +96,10 @@ rules:
       - policy.linkerd.io
     resources:
       - authorizationpolicies
+      - clientpolicies
+      - clientpolicybindings
       - httproutes
       - servers
-      # TODO(eliza): add client policy CRDs here when they exist
     verbs:
       - get
       - list
