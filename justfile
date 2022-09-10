@@ -81,6 +81,13 @@ install-viz: _install-cli
     {{ _l5d }} viz install | {{ _kubectl  }} apply -f -
     {{ _l5d }} viz check
 
+# install the booksapp example in the k3d cluster
+install-booksapp:
+    {{ _kubectl }} create ns booksapp
+    {{ _l5d }} inject examples/booksapp/ | {{ _kubectl }} -n booksapp apply -f -
+    {{ _kubectl }} -n booksapp rollout status deploy/webapp
+    {{ _kubectl }} -n booksapp get po
+
 # install the linkerd cli
 _install-cli:
     #!/usr/bin/env bash

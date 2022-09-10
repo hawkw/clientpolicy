@@ -34,6 +34,7 @@ pkgs.buildEnv {
     gopls
     godef
     go-outline
+    k9s
   ];
   passthru = {
     PROTOC = "${pkgs.protobuf}/bin/protoc";
