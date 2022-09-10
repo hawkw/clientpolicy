@@ -4,6 +4,9 @@ pub(crate) use linkerd_policy_controller_k8s_api as k8s;
 use crate::index::Index;
 use anyhow::Result;
 use clap::Parser;
+use client_policy_k8s_api::{
+    client_policy::ClientPolicy, client_policy_binding::ClientPolicyBinding,
+};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -82,6 +85,22 @@ async fn main() -> Result<()> {
         .with_client(client)
         .build()
         .await?;
+
+    let client = rt.client();
+
+    let client_policies = kube::Api::<ClientPolicy>::all(client.clone())
+        .list(&kube::api::ListParams::default())
+        .await?;
+    for client_policy in client_policies.items.into_iter() {
+        tracing::info!(?client_policy, "Look at this cool policy!");
+    }
+
+    let client_policy_bindings = kube::Api::<ClientPolicyBinding>::all(client)
+        .list(&kube::api::ListParams::default())
+        .await?;
+    for binding in client_policy_bindings.items.into_iter() {
+        tracing::info!(?binding, "Look at this cool policy binding!");
+    }
 
     let probe_networks = probe_networks.map(|IpNets(nets)| nets).unwrap_or_default();
     let index = Index::new(ClusterInfo {
