@@ -1,5 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
+use client_policy_k8s_api::{
+    client_policy::ClientPolicy, client_policy_binding::ClientPolicyBinding,
+};
 use std::net::SocketAddr;
 
 #[derive(Parser)]
@@ -43,6 +46,22 @@ async fn main() -> Result<()> {
         .with_client(client)
         .build()
         .await?;
+
+    let client = rt.client();
+
+    let client_policies = kube::Api::<ClientPolicy>::all(client.clone())
+        .list(&kube::api::ListParams::default())
+        .await?;
+    for client_policy in client_policies.items.into_iter() {
+        tracing::info!(?client_policy, "Look at this cool policy!");
+    }
+
+    let client_policy_bindings = kube::Api::<ClientPolicyBinding>::all(client)
+        .list(&kube::api::ListParams::default())
+        .await?;
+    for binding in client_policy_bindings.items.into_iter() {
+        tracing::info!(?binding, "Look at this cool policy binding!");
+    }
 
     tracing::info!(%grpc_addr, "serving ClientPolicy gRPC API");
 

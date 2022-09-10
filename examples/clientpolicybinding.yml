@@ -1,0 +1,25 @@
+apiVersion: policy.linkerd.io/v1alpha1
+kind: ClientPolicyBinding
+metadata:
+  name: authors
+spec:
+  policyRefs:
+    - group: policy.linkerd.io
+      kind: ClientPolicy
+      namespace: booksapp
+      name: authors-get
+    - group: policy.linkerd.io
+      kind: ClientPolicy
+      namespace: booksapp
+      name: authors-delete
+    - group: policy.linkerd.io
+      kind: ClientPolicy
+      namespace: booksapp
+      name: books-get
+    - group: policy.linkerd.io
+      kind: ClientPolicy
+      namespace: booksapp
+      name: books-delete
+  podSelector:
+    matchExpressions:
+      - { key: app, operator: NotIn, values: [] }

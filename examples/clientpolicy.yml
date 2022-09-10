@@ -1,0 +1,17 @@
+apiVersion: policy.linkerd.io/v1alpha1
+kind: ClientPolicy
+metadata:
+  name: authors-get
+spec:
+  targetRef:
+    name: authors-get
+    kind: HTTPRoute
+    group: policy.linkerd.io
+  failureClassification:
+    statuses:
+      - "401"
+      - "402"
+      - "500-599"
+  filters:
+    - type: Timeout
+      timeout: 500ms
