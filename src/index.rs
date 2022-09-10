@@ -2,7 +2,7 @@ use crate::{
     core,
     k8s::{self, ResourceExt},
     pod,
-    route::OutboundHttpRoute,
+    route::{OutboundHttpRoute, OutboundRouteBinding},
     server::{OutboundServer, Server},
     ClusterInfo,
 };
@@ -58,7 +58,8 @@ struct Pod {
 #[derive(Debug)]
 struct PolicyIndex {
     cluster_info: Arc<ClusterInfo>,
-    servers: HashMap<String, Server>,
+    servers: AHashMap<String, Server>,
+    http_routes: AHashMap<String, OutboundRouteBinding>,
 }
 
 struct NsUpdate<T> {
@@ -112,7 +113,24 @@ impl Index {
         join
     }
 
+    pub fn index_http_routes(&self, rt: &mut kubert::Runtime) -> tokio::task::JoinHandle<()> {
+        let watch = rt.watch_all::<k8s::policy::HttpRoute>(ListParams::default());
+        let index = kubert::index::namespaced(self.index.clone(), watch)
+            .instrument(tracing::info_span!("index_http_routes"));
+        let join = tokio::spawn(index);
+        tracing::info!("started HTTPRoute indexing");
+        join
+    }
+
     pub fn dump_index(&self, every: Duration) -> tokio::task::JoinHandle<()> {
+        use std::fmt::Write;
+        fn route_name(f: &mut String, rt: &core::InboundHttpRouteRef) {
+            match rt {
+                core::InboundHttpRouteRef::Default(name) => write!(f, "default:{}", name).unwrap(),
+                core::InboundHttpRouteRef::Linkerd(name) => write!(f, "{}", name).unwrap(),
+            }
+        }
+
         tracing::debug!(?every, "dumping index changes");
         let index = self.index.clone();
         tokio::spawn(async move {
@@ -128,18 +146,31 @@ impl Index {
                         .load_preset(UTF8_FULL)
                         .set_content_arrangement(ContentArrangement::Dynamic)
                         .set_width(80)
-                        .set_header(Row::from(vec!["ADDRESS", "SERVER", "KIND", "PROTOCOL"]));
+                        .set_header(Row::from(vec![
+                            "ADDRESS", "SERVER", "KIND", "PROTOCOL", "ROUTES",
+                        ]));
                     for (addr, srv) in &index.servers_by_addr {
                         let srv = srv.borrow();
                         let (name, kind) = match srv.reference {
                             core::ServerRef::Server(ref name) => (name.as_str(), "server"),
                             core::ServerRef::Default(name) => (name, "default"),
                         };
+                        let mut route_list = String::new();
+                        let mut routes = srv.http_routes.keys();
+                        if let Some(route) = routes.next() {
+                            route_name(&mut route_list, route);
+
+                            for route in routes {
+                                route_list.push_str(", ");
+                                route_name(&mut route_list, route);
+                            }
+                        }
                         srvs_by_addr.add_row(Row::from(vec![
                             Cell::new(&addr.to_string()),
                             Cell::new(name),
                             Cell::new(kind),
                             Cell::new(&format!("{:?}", srv.protocol)),
+                            Cell::new(route_list),
                         ]));
                     }
                     println!("{srvs_by_addr}");
@@ -301,13 +332,96 @@ impl kubert::index::IndexNamespacedResource<k8s::policy::Server> for LockedIndex
     }
 }
 
+impl kubert::index::IndexNamespacedResource<k8s::policy::HttpRoute> for LockedIndex {
+    fn apply(&mut self, route: k8s::policy::HttpRoute) {
+        let ns = route.namespace().expect("HttpRoute must have a namespace");
+        let name = route.name_unchecked();
+        let _span = tracing::info_span!("apply", %ns, %name).entered();
+
+        let route_binding = match route.try_into() {
+            Ok(binding) => binding,
+            Err(error) => {
+                tracing::info!(%ns, %name, %error, "Ignoring HTTPRoute");
+                return;
+            }
+        };
+
+        self.ns_or_default_with_reindex(ns, |ns| ns.policies.update_http_route(name, route_binding))
+    }
+
+    fn reset(
+        &mut self,
+        routes: Vec<k8s::policy::HttpRoute>,
+        deleted: kubert::index::NamespacedRemoved,
+    ) {
+        let _span = tracing::info_span!("reset").entered();
+
+        // Aggregate all of the updates by namespace so that we only reindex
+        // once per namespace.
+        type Ns = NsUpdate<OutboundRouteBinding>;
+        let mut updates_by_ns = HashMap::<String, Ns>::default();
+        for route in routes.into_iter() {
+            let namespace = route.namespace().expect("HttpRoute must be namespaced");
+            let name = route.name_unchecked();
+            let route_binding = match route.try_into() {
+                Ok(binding) => binding,
+                Err(error) => {
+                    tracing::info!(ns = %namespace, %name, %error, "Ignoring HTTPRoute");
+                    continue;
+                }
+            };
+            updates_by_ns
+                .entry(namespace)
+                .or_default()
+                .added
+                .push((name, route_binding));
+        }
+        for (ns, names) in deleted.into_iter() {
+            updates_by_ns.entry(ns).or_default().removed = names;
+        }
+
+        for (namespace, Ns { added, removed }) in updates_by_ns.into_iter() {
+            if added.is_empty() {
+                // If there are no live resources in the namespace, we do not
+                // want to create a default namespace instance, we just want to
+                // clear out all resources for the namespace (and then drop the
+                // whole namespace, if necessary).
+                self.ns_with_reindex(namespace, |ns| {
+                    ns.policies.http_routes.clear();
+                    true
+                });
+            } else {
+                // Otherwise, we take greater care to reindex only when the
+                // state actually changed. The vast majority of resets will see
+                // no actual data change.
+                self.ns_or_default_with_reindex(namespace, |ns| {
+                    let mut changed = !removed.is_empty();
+                    for name in removed.into_iter() {
+                        ns.policies.http_routes.remove(&name);
+                    }
+                    for (name, route_binding) in added.into_iter() {
+                        changed = ns.policies.update_http_route(name, route_binding) || changed;
+                    }
+                    changed
+                });
+            }
+        }
+    }
+
+    fn delete(&mut self, ns: String, name: String) {
+        let _span = tracing::info_span!("delete", %ns, %name).entered();
+        self.ns_with_reindex(ns, |ns| ns.policies.http_routes.remove(&name).is_some())
+    }
+}
+
 impl Namespace {
     fn new(cluster: &Arc<ClusterInfo>) -> Self {
         Self {
             pods: AHashMap::default(),
             policies: PolicyIndex {
                 cluster_info: cluster.clone(),
-                servers: HashMap::default(),
+                servers: AHashMap::default(),
+                http_routes: AHashMap::default(),
             },
         }
     }
@@ -612,6 +726,22 @@ impl PolicyIndex {
         true
     }
 
+    fn update_http_route(&mut self, name: String, route: OutboundRouteBinding) -> bool {
+        match self.http_routes.entry(name) {
+            Entry::Vacant(entry) => {
+                entry.insert(route);
+            }
+            Entry::Occupied(mut entry) => {
+                if *entry.get() == route {
+                    return false;
+                }
+                entry.insert(route);
+            }
+        }
+
+        true
+    }
+
     fn outbound_server<'p>(
         &self,
         name: String,
@@ -634,19 +764,18 @@ impl PolicyIndex {
         probe_paths: impl Iterator<Item = &'p str>,
     ) -> HashMap<core::InboundHttpRouteRef, OutboundHttpRoute> {
         // TODO(eliza): actually index routes...
-        // let routes = self
-        //     .http_routes
-        //     .iter()
-        //     .filter(|(_, route)| route.selects_server(server_name))
-        //     .map(|(name, route)| {
-        //         let mut route = route.route.clone();
-        //         route.authorizations = self.route_client_authzs(name, authentications);
-        //         (InboundHttpRouteRef::Linkerd(name.clone()), route)
-        //     })
-        //     .collect::<HashMap<_, _>>();
-        // if !routes.is_empty() {
-        //     return routes;
-        // }
+        let routes = self
+            .http_routes
+            .iter()
+            .filter(|(_, route)| route.selects_server(server_name))
+            .map(|(name, route)| {
+                let route = route.route.clone();
+                (core::InboundHttpRouteRef::Linkerd(name.clone()), route)
+            })
+            .collect::<HashMap<_, _>>();
+        if !routes.is_empty() {
+            return routes;
+        }
         self.cluster_info.default_outbound_http_routes(probe_paths)
     }
 }

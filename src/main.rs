@@ -111,6 +111,7 @@ async fn main() -> Result<()> {
 
     index.index_pods(&mut rt);
     index.index_servers(&mut rt);
+    index.index_http_routes(&mut rt);
 
     if let Some(secs) = dump_interval_secs {
         index.dump_index(Duration::from_secs(secs));
