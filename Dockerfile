@@ -15,14 +15,14 @@ RUN --mount=type=cache,target=target \
 RUN --mount=type=cache,target=target \
     --mount=type=cache,from=rust:1.63.0,source=/usr/local/cargo,target=/usr/local/cargo \
     if [ "$BUILD_TYPE" = debug ]; then \
-    cargo build --frozen --target=x86_64-unknown-linux-gnu --package=client-policy-controller && \
-    mv target/x86_64-unknown-linux-gnu/debug/client-policy-controller /tmp/ ; \
+    cargo build --frozen --target=x86_64-unknown-linux-gnu --package=linkerd-client-policy && \
+    mv target/x86_64-unknown-linux-gnu/debug/linkerd-client-policy /tmp/ ; \
     else \
-    cargo build --frozen --target=x86_64-unknown-linux-gnu --release --package=client-policy-controller && \
-    mv target/x86_64-unknown-linux-gnu/release/client-policy-controller /tmp/ ; \
+    cargo build --frozen --target=x86_64-unknown-linux-gnu --release --package=linkerd-client-policy && \
+    mv target/x86_64-unknown-linux-gnu/release/linkerd-client-policy /tmp/ ; \
     fi
 
 # Creates a minimal runtime image with the controller binary.
 FROM $RUNTIME_IMAGE
-COPY --from=build /tmp/client-policy-controller /bin/
-ENTRYPOINT ["/bin/client-policy-controller"]
+COPY --from=build /tmp/linkerd-client-policy /bin/
+ENTRYPOINT ["/bin/linkerd-client-policy"]
