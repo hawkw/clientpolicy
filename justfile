@@ -40,7 +40,7 @@ kubectl *args: _install-cli
     {{ _kubectl }} {{ args }}
 
 # install the client-policy-controller prototype
-install: k3d-load _install-cli
+install: k3d-load _install-cli install-crds
     {{ _l5d }} inject --manual client-policy-controller.yml \
         | {{ _kubectl }} apply -n linkerd -f -
 
@@ -64,6 +64,10 @@ k3d-delete:
 
 # create a k3d cluster and install linkerd
 setup: k3d-create && install-linkerd
+
+# install the ClientPolicy CRDs
+install-crds:
+    {{ _kubectl }} apply -f crds/
 
 # install linkerd in the k3d cluster
 install-linkerd: _install-cli
