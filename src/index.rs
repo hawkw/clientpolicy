@@ -123,14 +123,6 @@ impl Index {
     }
 
     pub fn dump_index(&self, every: Duration) -> tokio::task::JoinHandle<()> {
-        use std::fmt::Write;
-        fn route_name(f: &mut String, rt: &core::InboundHttpRouteRef) {
-            match rt {
-                core::InboundHttpRouteRef::Default(name) => write!(f, "default:{}", name).unwrap(),
-                core::InboundHttpRouteRef::Linkerd(name) => write!(f, "{}", name).unwrap(),
-            }
-        }
-
         tracing::debug!(?every, "dumping index changes");
         let index = self.index.clone();
         tokio::spawn(async move {
@@ -145,7 +137,6 @@ impl Index {
                     srvs_by_addr
                         .load_preset(UTF8_FULL)
                         .set_content_arrangement(ContentArrangement::Dynamic)
-                        .set_width(80)
                         .set_header(Row::from(vec![
                             "ADDRESS", "SERVER", "KIND", "PROTOCOL", "ROUTES",
                         ]));
@@ -155,16 +146,16 @@ impl Index {
                             core::ServerRef::Server(ref name) => (name.as_str(), "server"),
                             core::ServerRef::Default(name) => (name, "default"),
                         };
-                        let mut route_list = String::new();
-                        let mut routes = srv.http_routes.keys();
-                        if let Some(route) = routes.next() {
-                            route_name(&mut route_list, route);
+                        let route_list = srv
+                            .http_routes
+                            .keys()
+                            .map(|route| match route {
+                                core::InboundHttpRouteRef::Default(name) => name,
+                                core::InboundHttpRouteRef::Linkerd(name) => name.as_str(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
 
-                            for route in routes {
-                                route_list.push_str(", ");
-                                route_name(&mut route_list, route);
-                            }
-                        }
                         srvs_by_addr.add_row(Row::from(vec![
                             Cell::new(&addr.to_string()),
                             Cell::new(name),
