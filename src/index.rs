@@ -181,6 +181,8 @@ impl LockedIndex {
                 } else {
                     ns.get_mut().reindex_servers(&mut self.servers_by_addr);
                 }
+
+                self.changed = Instant::now();
             }
         }
     }
@@ -202,6 +204,8 @@ impl LockedIndex {
             .or_insert_with(|| Namespace::new(&self.cluster_info));
         if f(ns) {
             ns.reindex_servers(&mut self.servers_by_addr);
+
+            self.changed = Instant::now();
         }
     }
 }
@@ -257,14 +261,11 @@ impl kubert::index::IndexNamespacedResource<k8s::policy::Server> for LockedIndex
 
         let server = Server::from_resource(srv, &self.cluster_info);
         self.ns_or_default_with_reindex(ns, |ns| ns.policies.update_server(name, server));
-        self.changed = Instant::now();
     }
 
     #[tracing::instrument(name = "delete", skip(self), fields(%ns, %name))]
     fn delete(&mut self, ns: String, name: String) {
         self.ns_with_reindex(ns, |ns| ns.policies.servers.remove(&name).is_some());
-
-        self.changed = Instant::now();
     }
 
     fn reset(
@@ -318,8 +319,6 @@ impl kubert::index::IndexNamespacedResource<k8s::policy::Server> for LockedIndex
                 });
             }
         }
-
-        self.changed = Instant::now();
     }
 }
 
@@ -483,7 +482,7 @@ impl Namespace {
                 tracing::info!("pod updated");
                 pod.reindex_servers(&mut self.policies, servers_by_addr);
             }
-            None => tracing::info!("pod added"),
+            None => {} // no update
         };
 
         Ok(())
