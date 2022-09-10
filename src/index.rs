@@ -222,8 +222,6 @@ impl kubert::index::IndexNamespacedResource<k8s::Pod> for LockedIndex {
             .or_insert_with(|| Namespace::new(&self.cluster_info));
         if let Err(error) = ns.update_pod(name, pod, &mut self.servers_by_addr) {
             tracing::error!(%error, "illegal pod update");
-        } else {
-            self.changed = Instant::now();
         }
     }
 
@@ -446,13 +444,21 @@ impl Namespace {
             .ok_or_else(|| anyhow::format_err!("pod has no IP"))?
             .parse::<IpAddr>()?;
         let pod = match self.pods.entry(name.clone()) {
-            Entry::Vacant(entry) => Some(entry.insert(Pod {
-                meta,
-                port_names,
-                port_servers: pod::PortMap::default(),
-                probes,
-                ip,
-            })),
+            Entry::Vacant(entry) => {
+                let mut pod = Pod {
+                    meta,
+                    port_names: Default::default(),
+                    port_servers: pod::PortMap::default(),
+                    probes,
+                    ip,
+                };
+                for &port in port_names.values().flatten() {
+                    let rx = pod.set_default_server(port, &self.policies.cluster_info);
+                    servers_by_addr.insert(SocketAddr::new(ip, port.into()), rx);
+                }
+                pod.port_names = port_names;
+                Some(entry.insert(pod))
+            }
 
             Entry::Occupied(entry) => {
                 let pod = entry.into_mut();
