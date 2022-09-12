@@ -303,6 +303,15 @@ impl LockedIndex {
             self.changed = Instant::now();
         }
     }
+
+    fn reindex_all(&mut self) {
+        tracing::debug!("Reindexing all namespaces");
+        for ns in self.namespaces.values_mut() {
+            ns.reindex_servers(&mut self.servers_by_addr, &self.client_policies);
+        }
+
+        self.changed = Instant::now();
+    }
 }
 
 impl kubert::index::IndexNamespacedResource<k8s::Pod> for LockedIndex {
@@ -344,17 +353,6 @@ impl kubert::index::IndexNamespacedResource<k8s::Pod> for LockedIndex {
             self.changed = Instant::now();
         } else {
             tracing::debug!("tried to delete a pod in a namespace that does not exist!");
-        }
-    }
-}
-
-// === impl LockedIndex ===
-
-impl LockedIndex {
-    fn reindex_all(&mut self) {
-        tracing::debug!("Reindexing all namespaces");
-        for ns in self.namespaces.values_mut() {
-            ns.reindex_servers(&mut self.servers_by_addr, &self.client_policies);
         }
     }
 }
@@ -530,14 +528,55 @@ impl kubert::index::IndexNamespacedResource<ClientPolicy> for LockedIndex {
         }
     }
 
-    fn reset(&mut self, routes: Vec<ClientPolicy>, deleted: kubert::index::NamespacedRemoved) {
+    fn reset(&mut self, policies: Vec<ClientPolicy>, deleted: kubert::index::NamespacedRemoved) {
         let _span = tracing::info_span!("reset").entered();
-        todo!("eliza")
+        let mut changed = false;
+        for policy in policies.into_iter() {
+            let ns = policy
+                .namespace()
+                .expect("ClientPolicy must have a namespace");
+            let name = policy.name_unchecked();
+            let spec = match client_policy::Spec::try_from(policy) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    tracing::warn!(%ns, %name, %error, "invalid ClientPolicy");
+                    continue;
+                }
+            };
+            changed |= self.client_policies.update_policy(ns, name, spec);
+        }
+        for (ns_name, names) in deleted.into_iter() {
+            let _span = tracing::debug_span!("delete", ns = %ns_name).entered();
+            if let Entry::Occupied(mut ns) = self.client_policies.by_ns.entry(ns_name) {
+                for name in names.into_iter() {
+                    ns.get_mut().policies.remove(&name);
+                    tracing::debug!(%name, "deleting ClientPolicy");
+                }
+                if ns.get().is_empty() {
+                    tracing::debug!("namespace has no ClientPolicies, removing it");
+                    ns.remove();
+                }
+            }
+        }
+
+        if changed {
+            self.reindex_all()
+        }
     }
 
     #[tracing::instrument(skip(self), fields(%ns, %name))]
     fn delete(&mut self, ns: String, name: String) {
-        todo!("eliza")
+        if let Entry::Occupied(mut ns) = self.client_policies.by_ns.entry(ns) {
+            tracing::debug!("deleting ClientPolicy");
+            ns.get_mut().policies.remove(&name);
+            if ns.get().is_empty() {
+                tracing::debug!("namespace has no client policies, deleting it");
+                ns.remove();
+            }
+            self.reindex_all();
+        } else {
+            tracing::warn!("namespace already deleted!");
+        }
     }
 }
 
@@ -1025,6 +1064,12 @@ impl ClientPolicyNsIndex {
         }
 
         true
+    }
+}
+
+impl ClientPolicyIndex {
+    fn is_empty(&self) -> bool {
+        self.policies.is_empty() // && self.bindings.is_empty()
     }
 }
 
