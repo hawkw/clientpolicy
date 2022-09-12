@@ -10,6 +10,7 @@ use client_policy_k8s_api::{
 use std::net::SocketAddr;
 use std::time::Duration;
 
+mod client_policy;
 mod defaults;
 pub mod index;
 mod pod;
