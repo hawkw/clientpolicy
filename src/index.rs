@@ -452,6 +452,18 @@ impl Namespace {
                     probes,
                     ip,
                 };
+
+                // XXX(eliza): here is where we populate the `servers_by_addr`
+                // map with *all* the pod's default servers. this is different
+                // from what the policy-controller does: when a pod has only the
+                // default servers, the watch sender isn't added to the index
+                // until someone actually looks it up. that would be more
+                // efficient, but...nobody's actually doing lookups right now,
+                // so we populate the map eagerly so that we can generate a
+                // nice-looking table.
+                //
+                // if we end up using this code to serve real lookups, we should
+                // probably create these default servers lazily instead.
                 for &port in port_names.values().flatten() {
                     let rx = pod.set_default_server(port, &self.policies.cluster_info);
                     servers_by_addr.insert(SocketAddr::new(ip, port.into()), rx);
