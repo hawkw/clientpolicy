@@ -8,6 +8,7 @@ use crate::{
 };
 use ahash::{AHashMap, AHashSet};
 use anyhow::Result;
+use client_policy_k8s_api::client_policy::{self, ClientPolicy};
 use kubert::client::api::ListParams;
 use parking_lot::RwLock;
 use std::{
@@ -399,6 +400,22 @@ impl kubert::index::IndexNamespacedResource<k8s::policy::HttpRoute> for LockedIn
     fn delete(&mut self, ns: String, name: String) {
         let _span = tracing::info_span!("delete", %ns, %name).entered();
         self.ns_with_reindex(ns, |ns| ns.policies.http_routes.remove(&name).is_some())
+    }
+}
+
+impl kubert::index::IndexNamespacedResource<ClientPolicy> for LockedIndex {
+    fn apply(&mut self, policy: ClientPolicy) {
+        todo!("eliza")
+    }
+
+    fn reset(&mut self, routes: Vec<ClientPolicy>, deleted: kubert::index::NamespacedRemoved) {
+        let _span = tracing::info_span!("reset").entered();
+        todo!("eliza")
+    }
+
+    #[tracing::instrument(skip(self), fields(%ns, %name))]
+    fn delete(&mut self, ns: String, name: String) {
+        todo!("eliza")
     }
 }
 
