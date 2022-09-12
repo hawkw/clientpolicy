@@ -1,3 +1,6 @@
+[workspace]
+members = ["k8s/api"]
+
 [package]
 name = "linkerd-client-policy"
 version = "0.1.0"
