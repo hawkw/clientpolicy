@@ -97,7 +97,7 @@ impl TryFrom<k8s::ClientPolicy> for Spec {
 impl Target {
     fn try_from_target_ref(ns: String, target: NamespacedTargetRef) -> Result<Self, Error> {
         match target {
-            t if t.targets_kind::<HttpRoute>() => Ok(Target::Server {
+            t if t.targets_kind::<policy::Server>() => Ok(Target::Server {
                 name: t.name,
                 namespace: t.namespace.unwrap_or(ns),
             }),

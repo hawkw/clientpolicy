@@ -990,9 +990,11 @@ impl PolicyIndex {
         let potential_policies = client_policies
             .all_policies()
             .filter(|(_, policy)| policy.target_ns() == *self.namespace);
+        let _span = tracing::debug_span!("client_policies", ns = %self.namespace.as_ref(), server = %server_name).entered();
         for (name, policy) in potential_policies {
+            let _span = tracing::debug_span!("policy", message = %name).entered();
             if policy.selects_server(self.namespace.as_ref(), server_name) {
-                tracing::debug!(policy = %name, server = %server_name, "policy selects server");
+                tracing::debug!("policy selects server");
                 // TODO(eliza): how to handle multiple ClientPolicies selecting
                 // the same server?
                 assert_eq!(
@@ -1000,16 +1002,14 @@ impl PolicyIndex {
                     "we already found a policy that selects this server!"
                 );
                 server_policy = Some(policy.clone());
+            } else {
+                tracing::debug!("policy does not select server");
             }
 
             for (reference, route) in http_routes.iter_mut() {
+                let _span = tracing::debug_span!("route", ?reference).entered();
                 if policy.selects_route(self.namespace.as_ref(), reference) {
-                    tracing::debug!(
-                        policy = %name,
-                        route = ?reference,
-                        server = %server_name,
-                        "policy selects route on server",
-                    );
+                    tracing::debug!("policy selects route on server");
 
                     // TODO(eliza): how to handle multiple ClientPolicies selecting
                     // the same server?
@@ -1018,6 +1018,8 @@ impl PolicyIndex {
                         "we already found a policy that selects this route!"
                     );
                     route.client_policy = Some(policy.clone());
+                } else {
+                    tracing::debug!("policy does not select this route");
                 }
             }
         }
