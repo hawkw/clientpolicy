@@ -159,7 +159,7 @@ version = "0.1.0"
 dependencies = [
  "k8s-openapi",
  "kube",
- "linkerd-policy-controller-k8s-api 0.1.0 (git+https://github.com/linkerd/linkerd2)",
+ "linkerd-policy-controller-k8s-api",
  "schemars",
  "serde",
  "serde_json",
@@ -869,7 +869,7 @@ dependencies = [
  "kube",
  "kubert",
  "linkerd-policy-controller-core",
- "linkerd-policy-controller-k8s-api 0.1.0 (git+https://github.com/linkerd/linkerd2.git?rev=b7387820c315bd769380267235cfaa69aeef269d)",
+ "linkerd-policy-controller-k8s-api",
  "parking_lot",
  "tokio",
  "tracing",
@@ -894,24 +894,6 @@ dependencies = [
 name = "linkerd-policy-controller-k8s-api"
 version = "0.1.0"
 source = "git+https://github.com/linkerd/linkerd2.git?rev=b7387820c315bd769380267235cfaa69aeef269d#b7387820c315bd769380267235cfaa69aeef269d"
-dependencies = [
- "ipnet",
- "k8s-gateway-api",
- "k8s-openapi",
- "kube",
- "schemars",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "linkerd-policy-controller-k8s-api"
-version = "0.1.0"
-source = "git+https://github.com/linkerd/linkerd2#b7387820c315bd769380267235cfaa69aeef269d"
 dependencies = [
  "ipnet",
  "k8s-gateway-api",
