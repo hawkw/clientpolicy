@@ -94,6 +94,20 @@ impl Index {
         }
     }
 
+    /// Looks up the [`OutboundServer`] for a given [`SocketAddr`], returning a
+    /// `watch` on that address' outbound policy.
+    ///
+    /// This is the main entrypoint to the index that's used by the gRPC API
+    /// server.
+    pub fn addr_server_rx(&self, addr: SocketAddr) -> Result<watch::Receiver<OutboundServer>> {
+        self.index
+            .read()
+            .servers_by_addr
+            .get(&addr)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no server found for address {}", addr))
+    }
+
     pub fn index_pods(&self, rt: &mut kubert::Runtime) -> tokio::task::JoinHandle<()> {
         let watch = rt.watch_all::<k8s::Pod>(ListParams::default().labels(CONTROL_PLANE_NS_LABEL));
         let index = kubert::index::namespaced(self.index.clone(), watch)
