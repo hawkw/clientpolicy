@@ -7,8 +7,9 @@ use crate::{
     ClusterInfo,
 };
 use ahash::{AHashMap, AHashSet};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use client_policy_k8s_api::client_policy::ClientPolicy;
+use futures::TryFutureExt;
 use k8s::policy;
 use kubert::client::api::ListParams;
 use parking_lot::RwLock;
@@ -17,12 +18,14 @@ use std::{
         hash_map::{Entry, HashMap},
         BTreeSet,
     },
+    future::Future,
     net::{IpAddr, SocketAddr},
     num::NonZeroU16,
     sync::Arc,
 };
 use tokio::{
     sync::watch,
+    task,
     time::{Duration, Instant},
 };
 use tracing::Instrument;
@@ -129,31 +132,42 @@ impl Index {
             .ok_or_else(|| anyhow::anyhow!("no server found for address {}", addr))
     }
 
-    pub fn index_pods(&self, rt: &mut kubert::Runtime) -> tokio::task::JoinHandle<()> {
+    pub fn spawn_index_tasks(&self, rt: &mut kubert::Runtime) -> impl Future<Output = Result<()>> {
+        let pods = self.index_pods(rt);
+        let servers = self.index_resource::<k8s::policy::Server>(rt);
+        let routes = self.index_resource::<k8s::policy::HttpRoute>(rt);
+        let policies = self.index_resource::<ClientPolicy>(rt);
+        async move {
+            tokio::try_join! {
+                pods, servers, routes, policies,
+            }
+            .map(|_| ())
+        }
+    }
+
+    pub fn index_pods(&self, rt: &mut kubert::Runtime) -> impl Future<Output = Result<()>> {
         let watch = rt.watch_all::<k8s::Pod>(ListParams::default().labels(CONTROL_PLANE_NS_LABEL));
         let index = kubert::index::namespaced(self.index.clone(), watch)
-            .instrument(tracing::info_span!("index_pods"));
+            .instrument(tracing::info_span!("index", kind = %"Pod"));
+
         let join = tokio::spawn(index);
-        tracing::info!("started pod indexing");
-        join
+        tracing::info!("started Pod indexing");
+        join.map_err(|err| anyhow!("index task for Pods failed: {err}"))
     }
 
-    pub fn index_servers(&self, rt: &mut kubert::Runtime) -> tokio::task::JoinHandle<()> {
-        let watch = rt.watch_all::<k8s::policy::Server>(ListParams::default());
+    fn index_resource<R>(&self, rt: &mut kubert::Runtime) -> impl Future<Output = Result<()>>
+    where
+        R: kube::Resource + serde::de::DeserializeOwned + Clone + std::fmt::Debug + Send + 'static,
+        R::DynamicType: Default,
+        LockedIndex: kubert::index::IndexNamespacedResource<R>,
+    {
+        let kind = std::any::type_name::<R>().split("::").last().unwrap();
+        let watch = rt.watch_all::<R>(ListParams::default());
         let index = kubert::index::namespaced(self.index.clone(), watch)
-            .instrument(tracing::info_span!("index_servers"));
+            .instrument(tracing::info_span!("index", %kind));
         let join = tokio::spawn(index);
-        tracing::info!("started server indexing");
-        join
-    }
-
-    pub fn index_http_routes(&self, rt: &mut kubert::Runtime) -> tokio::task::JoinHandle<()> {
-        let watch = rt.watch_all::<k8s::policy::HttpRoute>(ListParams::default());
-        let index = kubert::index::namespaced(self.index.clone(), watch)
-            .instrument(tracing::info_span!("index_http_routes"));
-        let join = tokio::spawn(index);
-        tracing::info!("started HTTPRoute indexing");
-        join
+        tracing::info!("started {kind} indexing");
+        join.map_err(move |err| anyhow!("index task for {kind}s failed: {err}"))
     }
 
     pub fn dump_index(&self, every: Duration) -> tokio::task::JoinHandle<()> {

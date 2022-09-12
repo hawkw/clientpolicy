@@ -110,9 +110,7 @@ async fn main() -> Result<()> {
         default_policy,
     });
 
-    index.index_pods(&mut rt);
-    index.index_servers(&mut rt);
-    index.index_http_routes(&mut rt);
+    let indices = index.spawn_index_tasks(&mut rt);
 
     if let Some(secs) = dump_interval_secs {
         index.dump_index(Duration::from_secs(secs));
@@ -122,6 +120,7 @@ async fn main() -> Result<()> {
 
     // Run the Kubert indexers.
     rt.run().await?;
+    indices.await?;
 
     Ok(())
 }
