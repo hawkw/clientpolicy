@@ -4,9 +4,10 @@ metadata:
   name: authors-get
 spec:
   targetRef:
-    name: authors-get
+    name: authors-get-route
     kind: HTTPRoute
     group: policy.linkerd.io
+    namespace: booksapp
   failureClassification:
     statuses:
       - "401"

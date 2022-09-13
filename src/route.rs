@@ -1,24 +1,28 @@
-pub use crate::core::http_route::*;
-use crate::k8s::{
-    self,
-    policy::{httproute as policy, Server},
+pub(crate) use crate::core::http_route::*;
+use crate::{
+    client_policy,
+    k8s::{
+        self,
+        policy::{httproute as policy, Server},
+    },
 };
 use anyhow::{anyhow, Error, Result};
 use chrono::{offset::Utc, DateTime};
 use k8s_gateway_api as api;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OutboundHttpRoute {
     pub hostnames: Vec<HostMatch>,
     // TODO(eliza): need a separate outbound rule type eventually...
     pub rules: Vec<InboundHttpRouteRule>,
+    pub client_policy: Option<client_policy::Spec>,
 
     /// This is required for ordering returned `HttpRoute`s by their creation
     /// timestamp.
     pub creation_timestamp: Option<DateTime<Utc>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OutboundRouteBinding {
     pub parents: Vec<OutboundParentRef>,
     pub route: OutboundHttpRoute,
@@ -30,6 +34,7 @@ impl Default for OutboundHttpRoute {
             hostnames: Vec::new(),
             rules: Vec::new(),
             creation_timestamp: None,
+            client_policy: None,
         }
     }
 }
@@ -83,6 +88,7 @@ impl TryFrom<policy::HttpRoute> for OutboundRouteBinding {
                 hostnames,
                 rules,
                 creation_timestamp,
+                client_policy: None,
             },
         })
     }

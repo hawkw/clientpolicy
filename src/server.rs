@@ -1,4 +1,5 @@
 use crate::{
+    client_policy::Spec,
     core::{self, ProxyProtocol},
     k8s,
     route::OutboundHttpRoute,
@@ -7,12 +8,13 @@ use crate::{
 use std::collections::HashMap;
 
 /// Like `linkerd_policy_controller_core::InboundServer`, but...outbound.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OutboundServer {
     pub reference: core::ServerRef,
 
     pub protocol: ProxyProtocol,
     pub http_routes: HashMap<core::InboundHttpRouteRef, OutboundHttpRoute>,
+    pub client_policy: Option<Spec>,
 }
 
 /// The parts of a `Server` resource that can change.

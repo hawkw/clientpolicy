@@ -13,20 +13,22 @@ publish = false
 ahash = "0.7"
 anyhow = "1"
 chrono = "0.4"
+comfy-table = "6.1.0"
 clap = { version = "3", default-features = false, features = [
     "derive",
     "env",
     "std",
 ] }
+client-policy-k8s-api = { path = "./k8s/api" }
 futures = { version = "0.3", default-features = false }
+humantime = "2"
 ipnet = "2"
 k8s-openapi = { version = "0.15", features = ["v1_20"] }
 k8s-gateway-api = "0.6"
 parking_lot = "0.12"
+serde = "1"
 thiserror = "1"
 tracing = "0.1"
-comfy-table = "6.1.0"
-client-policy-k8s-api = { path = "./k8s/api" }
 
 [dependencies.kube]
 version = "0.74"
