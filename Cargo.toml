@@ -27,6 +27,7 @@ thiserror = "1"
 tracing = "0.1"
 comfy-table = "6.1.0"
 client-policy-k8s-api = { path = "./k8s/api" }
+client-policy-grpc = { path = "./grpc" }
 
 [dependencies.kube]
 version = "0.74"
