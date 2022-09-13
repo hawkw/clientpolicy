@@ -1,9 +1,9 @@
 use crate::{
-    client_policy::Spec,
+    client_policy,
     core::{self, ProxyProtocol},
     k8s,
     route::OutboundHttpRoute,
-    ClusterInfo,
+    server, service, ClusterInfo,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -11,11 +11,11 @@ use std::{collections::HashMap, sync::Arc};
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutboundServer {
     pub reference: core::ServerRef,
-    pub fqdn: Arc<str>,
+    pub fqdn: Option<Arc<str>>,
 
     pub protocol: ProxyProtocol,
     pub http_routes: HashMap<core::InboundHttpRouteRef, OutboundHttpRoute>,
-    pub client_policy: Option<Spec>,
+    pub client_policy: Option<client_policy::Spec>,
 }
 
 /// The parts of a `Server` resource that can change.

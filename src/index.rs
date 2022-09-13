@@ -223,7 +223,7 @@ impl Index {
 
                         srvs_by_addr.add_row(Row::from(vec![
                             Cell::new(&addr.to_string()),
-                            Cell::new(srv.fqdn.as_ref()),
+                            Cell::new(format!("{:?}", srv.fqdn)),
                             Cell::new(srvname),
                             Cell::new(&format!("{:?}", srv.protocol)),
                             Cell::new(route_list),
@@ -823,15 +823,11 @@ impl Pod {
                         .into_iter()
                         .flatten()
                         .map(|p| p.as_str());
-                    let s = ns_policies.outbound_server(
-                        port,
-                        service_name,
-                        service,
-                        &self.meta.settings,
-                        server,
-                        client_policies,
-                        probe_paths,
-                    );
+                    let s = ns_policies
+                        .outbound_server()
+                        .with_service(service_name, service)
+                        .with_server(server)
+                        .build(port, &self.meta.settings, client_policies, probe_paths);
                     let rx = self.update_server(port, service_name, s);
                     match servers_by_addr.entry(addr) {
                         Entry::Occupied(entry) => assert!(rx.same_channel(entry.get())),
@@ -846,19 +842,31 @@ impl Pod {
             }
         }
 
-        // Remove ports that didn't match a server
-        // TODO(eliza): we should do something about this
+        // Handle ports that don't have a service.
         for port in unmatched_ports.into_iter() {
             let addr = SocketAddr::new(self.ip, port.into());
-            // that aren't matched...
-            // let rx = self.set_default_server(port, &ns_policies.cluster_info);
-            // match servers_by_addr.entry(addr) {
-            //     Entry::Occupied(entry) => assert!(rx.same_channel(entry.get())),
-            //     Entry::Vacant(entry) => {
-            //         entry.insert(rx);
-            //     }
-            // }
-            servers_by_addr.remove(&addr);
+            let server = srvs
+                .iter()
+                .find(|(_, srv)| self.matches_server_port(&srv.port_ref, port));
+            let probe_paths = self
+                .probes
+                .get(&port)
+                .into_iter()
+                .flatten()
+                .map(|p| p.as_str());
+            let server = ns_policies.outbound_server().with_server(server).build(
+                port,
+                &self.meta.settings,
+                client_policies,
+                probe_paths,
+            );
+            let rx = self.set_default_server(port, server);
+            match servers_by_addr.entry(addr) {
+                Entry::Occupied(entry) => assert!(rx.same_channel(entry.get())),
+                Entry::Vacant(entry) => {
+                    entry.insert(rx);
+                }
+            }
         }
     }
 
@@ -939,47 +947,37 @@ impl Pod {
         rx
     }
 
-    // /// Updates a pod-port to use the given named server.
-    // fn set_default_server(
-    //     &mut self,
-    //     port: NonZeroU16,
-    //     config: &ClusterInfo,
-    // ) -> watch::Receiver<OutboundServer> {
-    //     let server = Self::default_outbound_server(
-    //         port,
-    //         &self.meta.settings,
-    //         self.probes
-    //             .get(&port)
-    //             .into_iter()
-    //             .flatten()
-    //             .map(|p| p.as_str()),
-    //         config,
-    //     );
-    //     match self.port_servers.entry(port) {
-    //         Entry::Vacant(entry) => {
-    //             tracing::debug!(%port, "Creating default server");
-    //             let (tx, rx) = watch::channel(server);
-    //             let rx2 = rx.clone();
-    //             entry.insert(PodPortServer { name: None, tx, rx });
-    //             rx2
-    //         }
+    /// Updates a pod-port to use the given named server.
+    fn set_default_server(
+        &mut self,
+        port: NonZeroU16,
+        server: OutboundServer,
+    ) -> watch::Receiver<OutboundServer> {
+        match self.port_servers.entry(port) {
+            Entry::Vacant(entry) => {
+                tracing::debug!(%port, "Creating default server");
+                let (tx, rx) = watch::channel(server);
+                let rx2 = rx.clone();
+                entry.insert(PodPortServer { name: None, tx, rx });
+                rx2
+            }
 
-    //         Entry::Occupied(mut entry) => {
-    //             let ps = entry.get_mut();
+            Entry::Occupied(mut entry) => {
+                let ps = entry.get_mut();
 
-    //             // Avoid sending redundant updates.
-    //             if *ps.rx.borrow() == server {
-    //                 tracing::trace!(%port, "Default server already set");
-    //                 return ps.rx.clone();
-    //             }
+                // Avoid sending redundant updates.
+                if *ps.rx.borrow() == server {
+                    tracing::trace!(%port, "Default server already set");
+                    return ps.rx.clone();
+                }
 
-    //             tracing::debug!(%port, "Setting default server");
-    //             ps.name = None;
-    //             ps.tx.send(server).expect("a receiver is held by the index");
-    //             ps.rx.clone()
-    //         }
-    //     }
-    // }
+                tracing::debug!(%port, "Setting default server");
+                ps.name = None;
+                ps.tx.send(server).expect("a receiver is held by the index");
+                ps.rx.clone()
+            }
+        }
+    }
 
     // fn default_outbound_server<'p>(
     //     port: NonZeroU16,
@@ -1065,53 +1063,13 @@ impl PolicyIndex {
         true
     }
 
-    /// XXX(eliza): this function signature is deeply ghastly...
-    fn outbound_server<'p>(
-        &self,
-        port: NonZeroU16,
-        service_name: &str,
-        service: &service::Spec,
-        settings: &pod::Settings,
-        server: Option<&(&String, &Server)>,
-        client_policies: &ClientPolicyNsIndex,
-        probe_paths: impl Iterator<Item = &'p str>,
-    ) -> OutboundServer {
-        let (mut http_routes, protocol, reference) = match server {
-            Some((srvname, server)) => {
-                tracing::trace!(service = %service_name, server = %srvname, "Creating outbound server");
-                let http_routes = self.http_routes(srvname, probe_paths);
-                let protocol = server.protocol.clone();
-                let reference = core::ServerRef::Server(srvname.to_string());
-                (http_routes, protocol, reference)
-            }
-            None => {
-                tracing::trace!(service = %service_name, "Creating default outbound server");
-                let http_routes = self.cluster_info.default_outbound_http_routes(probe_paths);
-                let protocol = if settings.opaque_ports.contains(&port) {
-                    core::ProxyProtocol::Opaque
-                } else {
-                    core::ProxyProtocol::Detect {
-                        timeout: self.cluster_info.default_detect_timeout,
-                    }
-                };
-                let policy = settings
-                    .default_policy
-                    .unwrap_or(self.cluster_info.default_policy);
-                let reference = core::ServerRef::Default(policy.as_str());
-                (http_routes, protocol, reference)
-            }
-        };
-        let client_policy = self.client_policies(&service_name, client_policies, &mut http_routes);
-
-        OutboundServer {
-            reference,
-            fqdn: service.fqdn.clone(),
-            protocol,
-            http_routes,
-            client_policy,
+    fn outbound_server(&self) -> OutboundServerBuilder<'_> {
+        OutboundServerBuilder {
+            policies: self,
+            service: None,
+            server: None,
         }
     }
-
     fn http_routes<'p>(
         &self,
         server_name: &str,
@@ -1275,5 +1233,83 @@ impl ClusterInfo {
         routes.insert(core::InboundHttpRouteRef::Default("probe"), probe_route);
 
         routes
+    }
+}
+
+pub(crate) struct OutboundServerBuilder<'a> {
+    policies: &'a PolicyIndex,
+    service: Option<(&'a str, &'a service::Spec)>,
+    server: Option<&'a (&'a String, &'a Server)>,
+}
+
+impl<'a> OutboundServerBuilder<'a> {
+    fn with_service(self, name: &'a str, spec: &'a service::Spec) -> Self {
+        Self {
+            service: Some((name, spec)),
+            ..self
+        }
+    }
+
+    fn with_server(self, server: Option<&'a (&'a String, &'a Server)>) -> Self {
+        Self { server, ..self }
+    }
+
+    fn build<'p>(
+        self,
+        port: NonZeroU16,
+        settings: &pod::Settings,
+        client_policies: &ClientPolicyNsIndex,
+        probe_paths: impl Iterator<Item = &'p str>,
+    ) -> OutboundServer {
+        tracing::debug!(
+            service = self.service.as_ref().map(|(name, _)| name),
+            server = self.server.as_ref().map(|(name, _)| name),
+            port,
+            "Creating outbound server"
+        );
+        let (mut http_routes, protocol, reference) = match self.server {
+            Some((srvname, server)) => {
+                let http_routes = self.policies.http_routes(srvname, probe_paths);
+                let protocol = server.protocol.clone();
+                let reference = core::ServerRef::Server(srvname.to_string());
+                (http_routes, protocol, reference)
+            }
+            None => {
+                let http_routes = self
+                    .policies
+                    .cluster_info
+                    .default_outbound_http_routes(probe_paths);
+                let protocol = if settings.opaque_ports.contains(&port) {
+                    core::ProxyProtocol::Opaque
+                } else {
+                    core::ProxyProtocol::Detect {
+                        timeout: self.policies.cluster_info.default_detect_timeout,
+                    }
+                };
+                let policy = settings
+                    .default_policy
+                    .unwrap_or(self.policies.cluster_info.default_policy);
+                let reference = core::ServerRef::Default(policy.as_str());
+                (http_routes, protocol, reference)
+            }
+        };
+        let (fqdn, client_policy) = self
+            .service
+            .map(|(service_name, service)| {
+                let policies =
+                    self.policies
+                        .client_policies(&service_name, client_policies, &mut http_routes);
+                let fqdn = Some(service.fqdn.clone());
+                (fqdn, policies)
+            })
+            .unwrap_or((None, None));
+
+        OutboundServer {
+            reference,
+            fqdn,
+            protocol,
+            http_routes,
+            client_policy,
+        }
     }
 }
