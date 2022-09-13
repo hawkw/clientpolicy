@@ -1,6 +1,6 @@
 use crate::{
     core,
-    k8s::policy::{self, HttpRoute, NamespacedTargetRef},
+    k8s::policy::{HttpRoute, NamespacedTargetRef},
 };
 use anyhow::{anyhow, Context, Error};
 use client_policy_k8s_api::client_policy as k8s;

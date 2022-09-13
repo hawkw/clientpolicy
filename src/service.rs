@@ -3,14 +3,13 @@ use ahash::AHashMap;
 use anyhow::{anyhow, Context, Result};
 use k8s_openapi::api::core::v1::Service;
 use kube::ResourceExt;
-use std::{net::IpAddr, num::NonZeroU16, sync::Arc};
+use std::{num::NonZeroU16, sync::Arc};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Spec {
     pub fqdn: Arc<str>,
     pub labels: k8s::Labels,
     pub pod_selector: k8s::labels::Selector,
-    // pub cluster_ips: Vec<IpAddr>,
     pub ports: AHashMap<String, NonZeroU16>,
 }
 
@@ -18,13 +17,6 @@ impl Spec {
     pub fn from_resource(config: &ClusterInfo, ns: &String, svc: Service) -> Result<Self> {
         let name = svc.name_unchecked();
         let spec = svc.spec.ok_or_else(|| anyhow!("service has no spec"))?;
-        // let cluster_ips = spec
-        //     .cluster_ips
-        //     .ok_or_else(|| anyhow!("service does not have cluster IPs!"))?
-        //     .iter()
-        //     .map(|ip| ip.parse().with_context(|| format!("invalid IP {ip:?}")))
-        //     .collect::<Result<Vec<_>>>()?;
-
         let pod_selector = spec
             .selector
             .ok_or_else(|| {
@@ -54,7 +46,6 @@ impl Spec {
             fqdn,
             labels,
             pod_selector,
-            // cluster_ips,
             ports,
         })
     }

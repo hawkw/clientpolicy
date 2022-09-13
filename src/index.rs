@@ -819,12 +819,6 @@ impl Pod {
                         .find(|(_, srv)| self.matches_server_port(&srv.port_ref, port));
 
                     let addr = SocketAddr::new(self.ip, port.into());
-                    let probe_paths = self
-                        .probes
-                        .get(&port)
-                        .into_iter()
-                        .flatten()
-                        .map(|p| p.as_str());
                     let s = ns_policies
                         .outbound_server()
                         .with_service(service_name, service)
@@ -1256,7 +1250,7 @@ impl<'a> OutboundServerBuilder<'a> {
         Self { server, ..self }
     }
 
-    fn build<'p>(
+    fn build(
         self,
         port: NonZeroU16,
         client_policies: &ClientPolicyNsIndex,
@@ -1302,7 +1296,7 @@ impl<'a> OutboundServerBuilder<'a> {
             .map(|(service_name, service)| {
                 let policies =
                     self.policies
-                        .client_policies(&service_name, client_policies, &mut http_routes);
+                        .client_policies(service_name, client_policies, &mut http_routes);
                 let fqdn = Some(service.fqdn.clone());
                 (fqdn, policies)
             })

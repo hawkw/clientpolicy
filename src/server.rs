@@ -3,7 +3,7 @@ use crate::{
     core::{self, ProxyProtocol},
     k8s,
     route::OutboundHttpRoute,
-    server, service, ClusterInfo,
+    ClusterInfo,
 };
 use std::{collections::HashMap, sync::Arc};
 

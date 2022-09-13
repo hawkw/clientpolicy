@@ -10,7 +10,7 @@ use anyhow::{anyhow, Error, Result};
 use chrono::{offset::Utc, DateTime};
 use k8s_gateway_api as api;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct OutboundHttpRoute {
     pub hostnames: Vec<HostMatch>,
     // TODO(eliza): need a separate outbound rule type eventually...
@@ -26,17 +26,6 @@ pub struct OutboundHttpRoute {
 pub struct OutboundRouteBinding {
     pub parents: Vec<OutboundParentRef>,
     pub route: OutboundHttpRoute,
-}
-
-impl Default for OutboundHttpRoute {
-    fn default() -> Self {
-        Self {
-            hostnames: Vec::new(),
-            rules: Vec::new(),
-            creation_timestamp: None,
-            client_policy: None,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
