@@ -9,6 +9,8 @@ spec:
     - name: authors-server
       kind: Server
       group: policy.linkerd.io
+    - name: authors
+      kind: Service
   rules:
     - matches:
       - path:

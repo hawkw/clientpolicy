@@ -937,10 +937,8 @@ impl PolicyIndex {
             port.opaque = opaque,
             "Creating outbound server"
         );
-        let probe_paths = pod.probe_paths(port.number);
 
-        // TODO(eliza): actually find the routes bound to this service.
-        let mut http_routes = self.cluster_info.default_outbound_http_routes(probe_paths);
+        let mut http_routes = self.http_routes(service_name, pod.probe_paths(port.number));
         let client_policy = self.client_policies(service_name, client_policies, &mut http_routes);
 
         let protocol = if opaque {
@@ -962,14 +960,13 @@ impl PolicyIndex {
 
     fn http_routes<'p>(
         &self,
-        server_name: &str,
+        service_name: &str,
         probe_paths: impl Iterator<Item = &'p str>,
     ) -> HashMap<core::InboundHttpRouteRef, OutboundHttpRoute> {
-        // TODO(eliza): actually index routes...
         let routes = self
             .http_routes
             .iter()
-            .filter(|(_, route)| route.selects_server(server_name))
+            .filter(|(_, route)| route.selects_service(service_name))
             .map(|(name, route)| {
                 let route = route.route.clone();
                 (core::InboundHttpRouteRef::Linkerd(name.clone()), route)
