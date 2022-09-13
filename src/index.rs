@@ -988,7 +988,7 @@ impl PolicyIndex {
         let potential_policies = client_policies
             .all_policies()
             .filter(|(_, policy)| policy.target_ns() == *self.namespace);
-        let _span = tracing::debug_span!("client_policies", ns = %self.namespace.as_ref(), server = %service_name).entered();
+        let _span = tracing::debug_span!("client_policies", ns = %self.namespace.as_ref(), service = %service_name).entered();
         for (name, policy) in potential_policies {
             let _span = tracing::debug_span!("policy", message = %name).entered();
             if policy.selects_service(self.namespace.as_ref(), service_name) {

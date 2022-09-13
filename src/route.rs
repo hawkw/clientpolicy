@@ -169,7 +169,7 @@ impl OutboundParentRef {
         route_ns: Option<&str>,
         parent_ref: api::ParentReference,
     ) -> Option<Result<Self, InvalidParentRef>> {
-        // Skip parent refs that don't target a `Server` resource.
+        // Skip parent refs that don't target a `Service` resource.
         if !policy::parent_ref_targets_kind::<Service>(&parent_ref) || parent_ref.name.is_empty() {
             return None;
         }

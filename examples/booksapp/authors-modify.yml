@@ -11,6 +11,7 @@ spec:
       group: policy.linkerd.io
     - name: authors
       kind: Service
+      group: core
   rules:
     - matches:
       - path:
