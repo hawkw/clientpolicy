@@ -15,7 +15,6 @@ mod defaults;
 pub mod index;
 mod pod;
 mod route;
-mod server;
 mod service;
 use ipnet::IpNet;
 
