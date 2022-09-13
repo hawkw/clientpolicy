@@ -711,7 +711,6 @@ impl Namespace {
                     probes,
                     ip,
                 };
-                /*
                 // XXX(eliza): here is where we populate the `servers_by_addr`
                 // map with *all* the pod's default servers. this is different
                 // from what the policy-controller does: when a pod has only the
@@ -724,10 +723,13 @@ impl Namespace {
                 // if we end up using this code to serve real lookups, we should
                 // probably create these default servers lazily instead.
                 for &port in port_names.values().flatten() {
-                    let rx = pod.set_default_server(port, &self.policies.cluster_info);
+                    let server = self
+                        .policies
+                        .outbound_server()
+                        .build(port, client_policies, &pod);
+                    let rx = pod.set_default_server(port, server);
                     servers_by_addr.insert(SocketAddr::new(ip, port.into()), rx);
                 }
-                */
                 pod.port_names = port_names;
                 Some(entry.insert(pod))
             }
@@ -827,7 +829,7 @@ impl Pod {
                         .outbound_server()
                         .with_service(service_name, service)
                         .with_server(server)
-                        .build(port, &self.meta.settings, client_policies, probe_paths);
+                        .build(port, client_policies, self);
                     let rx = self.update_server(port, service_name, s);
                     match servers_by_addr.entry(addr) {
                         Entry::Occupied(entry) => assert!(rx.same_channel(entry.get())),
@@ -848,17 +850,10 @@ impl Pod {
             let server = srvs
                 .iter()
                 .find(|(_, srv)| self.matches_server_port(&srv.port_ref, port));
-            let probe_paths = self
-                .probes
-                .get(&port)
-                .into_iter()
-                .flatten()
-                .map(|p| p.as_str());
             let server = ns_policies.outbound_server().with_server(server).build(
                 port,
-                &self.meta.settings,
                 client_policies,
-                probe_paths,
+                self,
             );
             let rx = self.set_default_server(port, server);
             match servers_by_addr.entry(addr) {
@@ -979,6 +974,13 @@ impl Pod {
         }
     }
 
+    fn probe_paths(&self, port: NonZeroU16) -> impl Iterator<Item = &str> + '_ {
+        self.probes
+            .get(&port)
+            .into_iter()
+            .flatten()
+            .map(|p| p.as_str())
+    }
     // fn default_outbound_server<'p>(
     //     port: NonZeroU16,
     //     settings: &pod::Settings,
@@ -1257,9 +1259,8 @@ impl<'a> OutboundServerBuilder<'a> {
     fn build<'p>(
         self,
         port: NonZeroU16,
-        settings: &pod::Settings,
         client_policies: &ClientPolicyNsIndex,
-        probe_paths: impl Iterator<Item = &'p str>,
+        pod: &Pod,
     ) -> OutboundServer {
         tracing::debug!(
             service = self.service.as_ref().map(|(name, _)| name),
@@ -1267,6 +1268,7 @@ impl<'a> OutboundServerBuilder<'a> {
             port,
             "Creating outbound server"
         );
+        let probe_paths = pod.probe_paths(port);
         let (mut http_routes, protocol, reference) = match self.server {
             Some((srvname, server)) => {
                 let http_routes = self.policies.http_routes(srvname, probe_paths);
@@ -1279,14 +1281,16 @@ impl<'a> OutboundServerBuilder<'a> {
                     .policies
                     .cluster_info
                     .default_outbound_http_routes(probe_paths);
-                let protocol = if settings.opaque_ports.contains(&port) {
+                let protocol = if pod.meta.settings.opaque_ports.contains(&port) {
                     core::ProxyProtocol::Opaque
                 } else {
                     core::ProxyProtocol::Detect {
                         timeout: self.policies.cluster_info.default_detect_timeout,
                     }
                 };
-                let policy = settings
+                let policy = pod
+                    .meta
+                    .settings
                     .default_policy
                     .unwrap_or(self.policies.cluster_info.default_policy);
                 let reference = core::ServerRef::Default(policy.as_str());
