@@ -13,8 +13,7 @@ pub struct OutboundServer {
     pub reference: core::ServerRef,
     pub fqdn: Arc<str>,
 
-    // TODO(eliza): we still need to get the proxyprotocol from a `Server`...
-    // pub protocol: ProxyProtocol,
+    pub protocol: ProxyProtocol,
     pub http_routes: HashMap<core::InboundHttpRouteRef, OutboundHttpRoute>,
     pub client_policy: Option<Spec>,
 }

@@ -25,7 +25,6 @@ use std::{
 };
 use tokio::{
     sync::watch,
-    task,
     time::{Duration, Instant},
 };
 use tracing::Instrument;
@@ -65,7 +64,6 @@ struct Namespace {
     name: Arc<String>,
     pods: AHashMap<String, Pod>,
     policies: PolicyIndex,
-    services: AHashMap<String, service::Spec>,
 }
 
 #[derive(Debug)]
@@ -81,7 +79,8 @@ struct Pod {
 struct PolicyIndex {
     namespace: Arc<String>,
     cluster_info: Arc<ClusterInfo>,
-    // servers: AHashMap<String, Server>,
+    servers: AHashMap<String, Server>,
+    services: AHashMap<String, service::Spec>,
     http_routes: AHashMap<String, OutboundRouteBinding>,
 }
 
@@ -136,17 +135,18 @@ impl Index {
     pub fn spawn_index_tasks(&self, rt: &mut kubert::Runtime) -> impl Future<Output = Result<()>> {
         let pods = self.index_pods(rt);
         let services = self.index_resource::<Service>(rt);
+        let servers = self.index_resource::<k8s::policy::Server>(rt);
         let routes = self.index_resource::<k8s::policy::HttpRoute>(rt);
         let policies = self.index_resource::<ClientPolicy>(rt);
         async move {
             tokio::try_join! {
-                pods, services, routes, policies,
+                pods, services, servers, routes, policies,
             }
             .map(|_| ())
         }
     }
 
-    pub fn index_pods(&self, rt: &mut kubert::Runtime) -> impl Future<Output = Result<()>> {
+    fn index_pods(&self, rt: &mut kubert::Runtime) -> impl Future<Output = Result<()>> {
         let watch = rt.watch_all::<k8s::Pod>(ListParams::default().labels(CONTROL_PLANE_NS_LABEL));
         let index = kubert::index::namespaced(self.index.clone(), watch)
             .instrument(tracing::info_span!("index", kind = %"Pod"));
@@ -195,13 +195,13 @@ impl Index {
                         .load_preset(UTF8_FULL)
                         .set_content_arrangement(ContentArrangement::Dynamic)
                         .set_header(Row::from(vec![
-                            "ADDRESS", "FQDN", "SERVICE", "KIND", "ROUTES", "POLICIES",
+                            "ADDRESS", "FQDN", "SERVER", "PROTOCOL", "ROUTES", "POLICIES",
                         ]));
                     for (addr, srv) in &index.servers_by_addr {
                         let srv = srv.borrow();
-                        let (name, kind) = match srv.reference {
-                            core::ServerRef::Server(ref name) => (name.as_str(), "server"),
-                            core::ServerRef::Default(name) => (name, "default"),
+                        let srvname = match srv.reference {
+                            core::ServerRef::Server(ref name) => name.clone(),
+                            core::ServerRef::Default(name) => format!("default:{name}"),
                         };
                         let route_list = srv
                             .http_routes
@@ -224,9 +224,8 @@ impl Index {
                         srvs_by_addr.add_row(Row::from(vec![
                             Cell::new(&addr.to_string()),
                             Cell::new(srv.fqdn.as_ref()),
-                            Cell::new(name),
-                            Cell::new(kind),
-                            // Cell::new(&format!("{:?}", srv.protocol)),
+                            Cell::new(srvname),
+                            Cell::new(&format!("{:?}", srv.protocol)),
                             Cell::new(route_list),
                             Cell::new(policy_list),
                         ]));
@@ -366,7 +365,7 @@ impl kubert::index::IndexNamespacedResource<Service> for LockedIndex {
         let _span = tracing::info_span!("apply", %ns, %name).entered();
         match service::Spec::from_resource(&self.cluster_info, &ns, svc) {
             Ok(svc) => {
-                self.ns_or_default_with_reindex(ns, |ns| ns.update_service(name, svc));
+                self.ns_or_default_with_reindex(ns, |ns| ns.policies.update_service(name, svc));
             }
             Err(error) => tracing::warn!(%error, "invalid Service {ns}/{name}"),
         }
@@ -374,7 +373,7 @@ impl kubert::index::IndexNamespacedResource<Service> for LockedIndex {
 
     #[tracing::instrument(name = "delete", skip(self), fields(%ns, %name))]
     fn delete(&mut self, ns: String, name: String) {
-        self.ns_with_reindex(ns, |ns| ns.services.remove(&name).is_some());
+        self.ns_with_reindex(ns, |ns| ns.policies.services.remove(&name).is_some());
     }
 
     fn reset(&mut self, svcs: Vec<Service>, deleted: AHashMap<String, AHashSet<String>>) {
@@ -407,7 +406,7 @@ impl kubert::index::IndexNamespacedResource<Service> for LockedIndex {
                 // clear out all resources for the namespace (and then drop the
                 // whole namespace, if necessary).
                 self.ns_with_reindex(namespace, |ns| {
-                    ns.services.clear();
+                    ns.policies.services.clear();
                     true
                 });
             } else {
@@ -417,10 +416,78 @@ impl kubert::index::IndexNamespacedResource<Service> for LockedIndex {
                 self.ns_or_default_with_reindex(namespace, |ns| {
                     let mut changed = !removed.is_empty();
                     for name in removed.into_iter() {
-                        ns.services.remove(&name);
+                        ns.policies.services.remove(&name);
+                    }
+                    for (name, svc) in added.into_iter() {
+                        changed = ns.policies.update_service(name, svc) || changed;
+                    }
+                    changed
+                });
+            }
+        }
+    }
+}
+
+impl kubert::index::IndexNamespacedResource<k8s::policy::Server> for LockedIndex {
+    fn apply(&mut self, srv: k8s::policy::Server) {
+        let ns = srv.namespace().expect("server must be namespaced");
+        let name = srv.name_unchecked();
+        let _span = tracing::info_span!("apply", %ns, %name).entered();
+        let srv = Server::from_resource(srv, &self.cluster_info);
+        self.ns_or_default_with_reindex(ns, |ns| ns.policies.update_server(name, srv));
+    }
+
+    #[tracing::instrument(name = "delete", skip(self), fields(%ns, %name))]
+    fn delete(&mut self, ns: String, name: String) {
+        self.ns_with_reindex(ns, |ns| ns.policies.servers.remove(&name).is_some());
+    }
+
+    fn reset(
+        &mut self,
+        srvs: Vec<k8s::policy::Server>,
+        deleted: AHashMap<String, AHashSet<String>>,
+    ) {
+        let _span = tracing::info_span!("reset").entered();
+
+        // Aggregate all of the updates by namespace so that we only reindex
+        // once per namespace.
+        type Ns = NsUpdate<Server>;
+        let mut updates_by_ns = AHashMap::<String, Ns>::default();
+        for srv in srvs.into_iter() {
+            let ns = srv.namespace().expect("server must be namespaced");
+            let name = srv.name_unchecked();
+            let server = Server::from_resource(srv, &self.cluster_info);
+            updates_by_ns
+                .entry(ns)
+                .or_default()
+                .added
+                .push((name, server));
+        }
+        for (ns, names) in deleted.into_iter() {
+            updates_by_ns.entry(ns).or_default().removed = names;
+        }
+
+        for (namespace, Ns { added, removed }) in updates_by_ns.into_iter() {
+            if added.is_empty() {
+                // If there are no live resources in the namespace, we do not
+                // want to create a default namespace instance, we just want to
+                // clear out all resources for the namespace (and then drop the
+                // whole namespace, if necessary).
+                self.ns_with_reindex(namespace, |ns| {
+                    ns.policies.servers.clear();
+                    true
+                });
+            } else {
+                // Otherwise, we take greater care to reindex only when the
+                // state actually changed. The vast majority of resets will see
+                // no actual data change.
+                self.ns_or_default_with_reindex(namespace, |ns| {
+                    let mut changed = !removed.is_empty();
+                    for name in removed.into_iter() {
+                        ns.policies.servers.remove(&name);
                     }
                     for (name, server) in added.into_iter() {
-                        changed = ns.update_service(name, server) || changed;
+                        changed = ns.policies.update_server(name, server) || changed;
                     }
                     changed
                 });
@@ -589,11 +656,11 @@ impl Namespace {
         Self {
             name: name.clone(),
             pods: AHashMap::default(),
-            services: AHashMap::default(),
             policies: PolicyIndex {
                 namespace: name,
                 cluster_info: cluster.clone(),
-                // servers: AHashMap::default(),
+                services: AHashMap::default(),
+                servers: AHashMap::default(),
                 http_routes: AHashMap::default(),
             },
         }
@@ -607,31 +674,8 @@ impl Namespace {
         let _span = tracing::info_span!("reindex", ns = %self.name).entered();
         for (name, pod) in &mut self.pods {
             let _span = tracing::info_span!("reindex_pod", pod = %name).entered();
-            pod.reindex_servers(
-                servers_by_addr,
-                client_policies,
-                &self.services,
-                &mut self.policies,
-            )
+            pod.reindex_servers(servers_by_addr, client_policies, &mut self.policies)
         }
-    }
-
-    fn update_service(&mut self, name: String, svc: service::Spec) -> bool {
-        match self.services.entry(name.clone()) {
-            Entry::Vacant(entry) => {
-                entry.insert(svc);
-            }
-            Entry::Occupied(entry) => {
-                let current = entry.into_mut();
-                if *current == svc {
-                    tracing::debug!(service = %name, "no changes");
-                    return false;
-                }
-                tracing::debug!(service = %name, "updating");
-                *current = svc;
-            }
-        }
-        true
     }
 
     fn update_pod(
@@ -714,12 +758,7 @@ impl Namespace {
         match pod {
             Some(pod) => {
                 tracing::info!("pod updated");
-                pod.reindex_servers(
-                    servers_by_addr,
-                    client_policies,
-                    &self.services,
-                    &mut self.policies,
-                )
+                pod.reindex_servers(servers_by_addr, client_policies, &mut self.policies)
             }
             None => {} // no update
         };
@@ -734,7 +773,6 @@ impl Pod {
         &mut self,
         servers_by_addr: &mut ServersByAddr,
         client_policies: &ClientPolicyNsIndex,
-        services: &AHashMap<String, service::Spec>,
         ns_policies: &mut PolicyIndex,
     ) {
         // Keep track of the ports that are already known in the pod so that, after applying server
@@ -751,7 +789,14 @@ impl Pod {
             std::hash::BuildHasherDefault::<pod::PortHasher>::default(),
         );
 
-        for (svcname, service) in services.iter() {
+        // grab all the Servers that might match this pod.
+        let srvs = ns_policies
+            .servers
+            .iter()
+            .filter(|(_, srv)| srv.pod_selector.matches(&self.meta.labels))
+            .collect::<Vec<(&String, &Server)>>();
+
+        for (service_name, service) in ns_policies.services.iter() {
             if service.pod_selector.matches(&self.meta.labels) {
                 for (portname, &port) in &service.ports {
                     // If the port is already matched to a server, then log a warning and skip
@@ -761,11 +806,15 @@ impl Pod {
                             port.name = %portname,
                             port = port,
                             server = %prior,
-                            conflict = %svcname,
+                            conflict = %service_name,
                             "Port already matched by another server; skipping"
                         );
                         continue;
                     }
+
+                    let server = srvs
+                        .iter()
+                        .find(|(_, srv)| self.matches_server_port(&srv.port_ref, port));
 
                     let addr = SocketAddr::new(self.ip, port.into());
                     let probe_paths = self
@@ -775,12 +824,15 @@ impl Pod {
                         .flatten()
                         .map(|p| p.as_str());
                     let s = ns_policies.outbound_server(
-                        svcname.clone(),
+                        port,
+                        service_name,
                         service,
+                        &self.meta.settings,
+                        server,
                         client_policies,
                         probe_paths,
                     );
-                    let rx = self.update_server(port, svcname, s);
+                    let rx = self.update_server(port, service_name, s);
                     match servers_by_addr.entry(addr) {
                         Entry::Occupied(entry) => assert!(rx.same_channel(entry.get())),
                         Entry::Vacant(entry) => {
@@ -788,16 +840,16 @@ impl Pod {
                         }
                     }
 
-                    matched_ports.insert(port, svcname.clone());
+                    matched_ports.insert(port, service_name.clone());
                     unmatched_ports.remove(&port);
                 }
             }
         }
 
-        // Reset all remaining ports to the default policy.
+        // Remove ports that didn't match a server
+        // TODO(eliza): we should do something about this
         for port in unmatched_ports.into_iter() {
             let addr = SocketAddr::new(self.ip, port.into());
-            // TODO(eliza): we still need to do default policies for svc ports
             // that aren't matched...
             // let rx = self.set_default_server(port, &ns_policies.cluster_info);
             // match servers_by_addr.entry(addr) {
@@ -810,22 +862,25 @@ impl Pod {
         }
     }
 
-    // /// Enumerates ports.
-    // ///
-    // /// A named port may refer to an arbitrary number of port numbers.
-    // fn select_ports(&mut self, port_ref: &k8s::policy::server::Port) -> Vec<NonZeroU16> {
-    //     use k8s::policy::server::Port;
-    //     match port_ref {
-    //         Port::Number(p) => Some(*p).into_iter().collect(),
-    //         Port::Name(name) => self
-    //             .port_names
-    //             .get(name)
-    //             .into_iter()
-    //             .flatten()
-    //             .cloned()
-    //             .collect(),
-    //     }
-    // }
+    /// Enumerates ports.
+    ///
+    /// A named port may refer to an arbitrary number of port numbers.
+    fn matches_server_port(
+        &mut self,
+        port_ref: &k8s::policy::server::Port,
+        port: NonZeroU16,
+    ) -> bool {
+        use k8s::policy::server::Port;
+        match port_ref {
+            Port::Number(p) => p == &port,
+            Port::Name(name) => self
+                .port_names
+                .get(name)
+                .into_iter()
+                .flatten()
+                .any(|p| p == &port),
+        }
+    }
 
     /// Returns an iterator over all the `SocketAddr`s of this pod's ports.
     fn addrs(&self) -> impl Iterator<Item = SocketAddr> + '_ {
@@ -974,22 +1029,84 @@ impl PolicyIndex {
         true
     }
 
+    fn update_server(&mut self, name: String, srv: Server) -> bool {
+        match self.servers.entry(name.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(srv);
+            }
+            Entry::Occupied(entry) => {
+                let current = entry.into_mut();
+                if *current == srv {
+                    tracing::debug!(server = %name, "no changes");
+                    return false;
+                }
+                tracing::debug!(server = %name, "updating");
+                *current = srv;
+            }
+        }
+        true
+    }
+
+    fn update_service(&mut self, name: String, svc: service::Spec) -> bool {
+        match self.services.entry(name.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(svc);
+            }
+            Entry::Occupied(entry) => {
+                let current = entry.into_mut();
+                if *current == svc {
+                    tracing::debug!(service = %name, "no changes");
+                    return false;
+                }
+                tracing::debug!(service = %name, "updating");
+                *current = svc;
+            }
+        }
+        true
+    }
+
+    /// XXX(eliza): this function signature is deeply ghastly...
     fn outbound_server<'p>(
         &self,
-        name: String,
+        port: NonZeroU16,
+        service_name: &str,
         service: &service::Spec,
+        settings: &pod::Settings,
+        server: Option<&(&String, &Server)>,
         client_policies: &ClientPolicyNsIndex,
         probe_paths: impl Iterator<Item = &'p str>,
     ) -> OutboundServer {
-        tracing::trace!(%name, ?service, "Creating outbound server");
-        let mut http_routes = self.http_routes(&name, probe_paths);
-        let client_policy = self.client_policies(&name, client_policies, &mut http_routes);
+        let (mut http_routes, protocol, reference) = match server {
+            Some((srvname, server)) => {
+                tracing::trace!(service = %service_name, server = %srvname, "Creating outbound server");
+                let http_routes = self.http_routes(srvname, probe_paths);
+                let protocol = server.protocol.clone();
+                let reference = core::ServerRef::Server(srvname.to_string());
+                (http_routes, protocol, reference)
+            }
+            None => {
+                tracing::trace!(service = %service_name, "Creating default outbound server");
+                let http_routes = self.cluster_info.default_outbound_http_routes(probe_paths);
+                let protocol = if settings.opaque_ports.contains(&port) {
+                    core::ProxyProtocol::Opaque
+                } else {
+                    core::ProxyProtocol::Detect {
+                        timeout: self.cluster_info.default_detect_timeout,
+                    }
+                };
+                let policy = settings
+                    .default_policy
+                    .unwrap_or(self.cluster_info.default_policy);
+                let reference = core::ServerRef::Default(policy.as_str());
+                (http_routes, protocol, reference)
+            }
+        };
+        let client_policy = self.client_policies(&service_name, client_policies, &mut http_routes);
 
         OutboundServer {
-            reference: core::ServerRef::Server(name),
+            reference,
             fqdn: service.fqdn.clone(),
-            // TODO(eliza): fix this
-            // protocol: server.protocol.clone(),
+            protocol,
             http_routes,
             client_policy,
         }
