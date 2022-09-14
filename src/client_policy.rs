@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::{anyhow, Context, Error};
 use client_policy_k8s_api::client_policy as k8s;
-pub use k8s::FailureClassification;
+pub use k8s::HttpFailureClassification;
 use k8s_openapi::api;
 use kube::ResourceExt;
 use std::{convert::TryFrom, time::Duration};
@@ -13,7 +13,7 @@ use std::{convert::TryFrom, time::Duration};
 pub struct Spec {
     pub name: String,
     pub target: Target,
-    pub failure_classification: FailureClassification,
+    pub failure_classification: HttpFailureClassification,
     pub filters: Vec<Filter>,
 }
 
@@ -66,13 +66,13 @@ impl Spec {
     }
 }
 
-impl TryFrom<k8s::ClientPolicy> for Spec {
+impl TryFrom<k8s::HttpClientPolicy> for Spec {
     type Error = Error;
 
-    fn try_from(policy: k8s::ClientPolicy) -> Result<Self, Self::Error> {
+    fn try_from(policy: k8s::HttpClientPolicy) -> Result<Self, Self::Error> {
         let ns = policy
             .namespace()
-            .ok_or_else(|| anyhow!("ClientPolicy must be namespaced"))?;
+            .ok_or_else(|| anyhow!("HttpClientPolicy must be namespaced"))?;
         let name = policy.name_unchecked();
         let target = Target::try_from_target_ref(ns, policy.spec.target_ref)?;
         // XXX(eliza): it would be good to validate that these are real http
@@ -115,12 +115,12 @@ impl Target {
 
 // === impl Filter ===
 
-impl TryFrom<k8s::ClientPolicyFilter> for Filter {
+impl TryFrom<k8s::HttpClientPolicyFilter> for Filter {
     type Error = Error;
 
-    fn try_from(filter: k8s::ClientPolicyFilter) -> Result<Self, Self::Error> {
+    fn try_from(filter: k8s::HttpClientPolicyFilter) -> Result<Self, Self::Error> {
         match filter {
-            k8s::ClientPolicyFilter::Timeout { timeout } => humantime::parse_duration(&timeout)
+            k8s::HttpClientPolicyFilter::Timeout { timeout } => humantime::parse_duration(&timeout)
                 .map(Filter::Timeout)
                 .with_context(|| format!("invalid timeout duration '{timeout}'")),
         }

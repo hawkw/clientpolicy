@@ -5,7 +5,7 @@ use crate::index::Index;
 use anyhow::Result;
 use clap::Parser;
 use client_policy_k8s_api::{
-    client_policy::ClientPolicy, client_policy_binding::ClientPolicyBinding,
+    client_policy::HttpClientPolicy, client_policy_binding::ClientPolicyBinding,
 };
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -96,11 +96,11 @@ async fn main() -> Result<()> {
 
     let client = rt.client();
 
-    let client_policies = kube::Api::<ClientPolicy>::all(client.clone())
+    let client_policies = kube::Api::<HttpClientPolicy>::all(client.clone())
         .list(&kube::api::ListParams::default())
         .await?;
     for client_policy in client_policies.items.into_iter() {
-        tracing::info!(?client_policy, "Look at this cool policy!");
+        tracing::info!(?client_policy, "Look at this cool HTTP policy!");
     }
 
     let client_policy_bindings = kube::Api::<ClientPolicyBinding>::all(client)
