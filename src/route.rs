@@ -13,7 +13,7 @@ pub struct OutboundHttpRoute {
     pub hostnames: Vec<HostMatch>,
     // TODO(eliza): need a separate outbound rule type eventually...
     pub rules: Vec<InboundHttpRouteRule>,
-    pub client_policy: Option<client_policy::Spec>,
+    pub client_policies: client_policy::PolicySet,
 
     /// This is required for ordering returned `HttpRoute`s by their creation
     /// timestamp.
@@ -75,7 +75,7 @@ impl TryFrom<policy::HttpRoute> for OutboundRouteBinding {
                 hostnames,
                 rules,
                 creation_timestamp,
-                client_policy: None,
+                client_policies: Default::default(),
             },
         })
     }

@@ -1,11 +1,11 @@
 use crate::{
-    core,
+    core, index,
     k8s::{
         self,
         policy::{HttpRoute, NamespacedTargetRef},
     },
 };
-use ahash::AHashMap;
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use anyhow::{anyhow, ensure, Context, Error};
 pub use client_policy::HttpFailureClassification;
 use client_policy_k8s_api::{
@@ -14,7 +14,7 @@ use client_policy_k8s_api::{
 };
 use k8s_openapi::api;
 use kube::ResourceExt;
-use std::{convert::TryFrom, time::Duration};
+use std::{collections::hash_map::Entry, convert::TryFrom, fmt, time::Duration};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Spec {
@@ -38,6 +38,13 @@ pub struct Bound {
     pub client_pod_selector: k8s::labels::Selector,
 }
 
+/// The set of client policies and bindings on a `Service` or `HttpRoute`.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct PolicySet {
+    pub policies: HashMap<PolicyRef, Spec>,
+    pub bindings: HashMap<PolicyRef, Bound>,
+}
+
 #[derive(Hash, Clone, Debug, PartialEq, Eq)]
 pub struct PolicyRef {
     pub name: String,
@@ -53,6 +60,15 @@ pub enum Target {
     HttpRoute { name: String, namespace: String },
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TargetRef<'a> {
+    /// This policy's parent ref is a `Service`.
+    Service { name: &'a str, namespace: &'a str },
+
+    /// This policy's parent ref is an `HTTPRoute`.
+    HttpRoute { name: &'a str, namespace: &'a str },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Filter {
     Timeout(Duration),
@@ -65,6 +81,32 @@ impl Spec {
         match self.target {
             Target::Service { ref namespace, .. } => namespace,
             Target::HttpRoute { ref namespace, .. } => namespace,
+        }
+    }
+
+    pub fn selects(&self, target_ref: TargetRef<'_>) -> bool {
+        match (target_ref, &self.target) {
+            (
+                TargetRef::Service {
+                    name: n,
+                    namespace: ns,
+                },
+                Target::Service {
+                    ref name,
+                    ref namespace,
+                },
+            ) => name == n && namespace == ns,
+            (
+                TargetRef::HttpRoute {
+                    name: n,
+                    namespace: ns,
+                },
+                Target::HttpRoute {
+                    ref name,
+                    ref namespace,
+                },
+            ) => name == n && namespace == ns,
+            _ => false,
         }
     }
 
@@ -176,6 +218,79 @@ impl TryFrom<client_policy::HttpClientPolicyFilter> for Filter {
                     .map(Filter::Timeout)
                     .with_context(|| format!("invalid timeout duration '{timeout}'"))
             }
+        }
+    }
+}
+
+// === impl PolicySet ===
+
+impl PolicySet {
+    pub fn reindex(&mut self, target: TargetRef<'_>, index: &index::ClientPolicyNsIndex) -> bool {
+        let mut changed = false;
+        let mut unmatched_policies = self.policies.keys().cloned().collect::<HashSet<_>>();
+        for (policy, spec) in index.policies_for(target) {
+            let _span = tracing::debug_span!("policy", policy.ns = %policy.namespace, message = %policy.name).entered();
+            unmatched_policies.remove(&policy);
+            match self.policies.entry(policy) {
+                Entry::Occupied(mut entry) => {
+                    if entry.get() != spec {
+                        tracing::debug!("updated policy");
+                        entry.insert(spec.clone());
+                        changed = true;
+                    }
+                }
+                Entry::Vacant(entry) => {
+                    tracing::debug!("added policy");
+                    entry.insert(spec.clone());
+                    changed = true;
+                }
+            }
+        }
+        for policy in unmatched_policies {
+            tracing::debug!(policy.ns = %policy.namespace, %policy.name, "removed policy");
+            self.policies.remove(&policy);
+            changed = true;
+        }
+
+        let mut unmatched_bindings = self.bindings.keys().cloned().collect::<HashSet<_>>();
+        for (binding, spec) in index.bindings_for(&self.policies) {
+            let _span = tracing::debug_span!("binding", binding.ns = %binding.namespace, message = %binding.name).entered();
+            unmatched_bindings.remove(&binding);
+            match self.bindings.entry(binding) {
+                Entry::Occupied(mut entry) => {
+                    if entry.get() != &spec {
+                        tracing::debug!("updated policy binding");
+                        entry.insert(spec);
+                        changed = true;
+                    }
+                }
+                Entry::Vacant(entry) => {
+                    tracing::debug!("added policy binding");
+                    entry.insert(spec);
+                    changed = true;
+                }
+            }
+        }
+
+        for binding in unmatched_bindings {
+            tracing::debug!(binding.ns = %binding.namespace, %binding.name, "removed policy binding");
+            self.bindings.remove(&binding);
+            changed = true;
+        }
+
+        if !changed {
+            tracing::debug!("no changes");
+        }
+
+        changed
+    }
+}
+
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Target::Service { name, namespace } => write!(f, "Service {}/{}", namespace, name),
+            Target::HttpRoute { name, namespace } => write!(f, "HTTPRoute {}/{}", namespace, name),
         }
     }
 }

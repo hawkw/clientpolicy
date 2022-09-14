@@ -1,9 +1,8 @@
 use crate::{
     client_policy, core,
     k8s::{self, ResourceExt},
-    pod,
-    route::{OutboundHttpRoute, OutboundRouteBinding},
-    service::{self, OutboundService, OutboundServiceRef},
+    route::OutboundRouteBinding,
+    service::OutboundService,
     ClusterInfo,
 };
 use ahash::{AHashMap as HashMap, AHashSet};
@@ -15,17 +14,8 @@ use futures::TryFutureExt;
 use k8s_openapi::api::core::v1::Service;
 use kubert::client::api::ListParams;
 use parking_lot::RwLock;
-use std::{
-    collections::{hash_map::Entry, BTreeSet},
-    future::Future,
-    net::{IpAddr, SocketAddr},
-    num::NonZeroU16,
-    sync::Arc,
-};
-use tokio::{
-    sync::watch,
-    time::{Duration, Instant},
-};
+use std::{collections::hash_map::Entry, future::Future, net::SocketAddr, sync::Arc};
+use tokio::sync::{watch, Notify};
 use tracing::Instrument;
 
 #[derive(Debug)]
@@ -34,12 +24,12 @@ pub struct Index {
 }
 
 #[derive(Debug)]
-struct LockedIndex {
-    cluster_info: Arc<ClusterInfo>,
+pub struct LockedIndex {
+    pub cluster_info: Arc<ClusterInfo>,
     namespaces: HashMap<String, Namespace>,
-    client_policies: ClientPolicyNsIndex,
+    pub client_policies: ClientPolicyNsIndex,
     services_by_addr: ServicesByAddr,
-    changed: Instant,
+    changed: Arc<Notify>,
 }
 
 type ServicesByAddr = HashMap<SocketAddr, watch::Receiver<OutboundService>>;
@@ -60,34 +50,34 @@ struct ClientPolicyIndex {
 }
 
 #[derive(Debug)]
-struct Namespace {
+pub struct Namespace {
     name: Arc<String>,
-    pods: HashMap<String, Pod>,
-    policies: PolicyIndex,
+    // pods: HashMap<String, Pod>,
+    pub policies: PolicyIndex,
 }
 
-#[derive(Debug)]
-struct Pod {
-    meta: pod::Meta,
-    ip: IpAddr,
-    port_names: HashMap<String, pod::PortSet>,
-    // port_servers: pod::PortMap<PodPortServer>,
-    probes: pod::PortMap<BTreeSet<String>>,
-}
+// #[derive(Debug)]
+// struct Pod {
+//     meta: pod::Meta,
+//     ip: IpAddr,
+//     port_names: HashMap<String, pod::PortSet>,
+//     // port_servers: pod::PortMap<PodPortServer>,
+//     probes: pod::PortMap<BTreeSet<String>>,
+// }
 
 #[derive(Debug)]
-struct PolicyIndex {
-    namespace: Arc<String>,
-    cluster_info: Arc<ClusterInfo>,
+pub struct PolicyIndex {
+    // namespace: Arc<String>,
+    // cluster_info: Arc<ClusterInfo>,
     services: HashMap<String, watch::Sender<OutboundService>>,
-    http_routes: HashMap<String, OutboundRouteBinding>,
+    pub http_routes: HashMap<String, OutboundRouteBinding>,
 }
 
 struct NsUpdate<T> {
     added: Vec<(String, T)>,
     removed: AHashSet<String>,
 }
-const CONTROL_PLANE_NS_LABEL: &str = "linkerd.io/control-plane-ns";
+// const CONTROL_PLANE_NS_LABEL: &str = "linkerd.io/control-plane-ns";
 
 impl Index {
     pub fn new(cluster: ClusterInfo) -> Self {
@@ -96,7 +86,7 @@ impl Index {
                 cluster_info: Arc::new(cluster),
                 namespaces: HashMap::new(),
                 services_by_addr: HashMap::new(),
-                changed: Instant::now(),
+                changed: Arc::new(Notify::new()),
                 client_policies: ClientPolicyNsIndex::default(),
             })),
         }
@@ -156,9 +146,10 @@ impl Index {
         join.map_err(move |err| anyhow!("index task for {kind}s failed: {err}"))
     }
 
-    pub fn dump_index(&self, every: Duration) -> tokio::task::JoinHandle<()> {
-        tracing::debug!(?every, "dumping index changes");
+    pub fn dump_index(&self) -> tokio::task::JoinHandle<()> {
+        tracing::debug!("dumping index changes");
         let index = self.index.clone();
+        let changed = index.read().changed.clone();
 
         fn route_name(route: &core::InboundHttpRouteRef) -> &str {
             match route {
@@ -168,16 +159,13 @@ impl Index {
         }
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(every);
-            let mut last_changed = index.read().changed;
             loop {
-                interval.tick().await;
-                let index = index.read();
-                if index.changed >= last_changed {
-                    use comfy_table::{presets::UTF8_FULL, *};
+                {
+                    let index = index.read();
+                    use comfy_table::{presets::ASCII_MARKDOWN, *};
                     let mut svcs_by_addr = Table::new();
                     svcs_by_addr
-                        .load_preset(UTF8_FULL)
+                        .load_preset(ASCII_MARKDOWN)
                         .set_content_arrangement(ContentArrangement::Dynamic)
                         .set_header(Row::from(vec![
                             "ADDRESS",
@@ -193,35 +181,53 @@ impl Index {
                         //     .map(route_name)
                         //     .collect::<Vec<_>>()
                         //     .join("\n");
-                        let bindings = svc
-                            .client_bindings
+                        let rt_policy_bindings =
+                            svc.http_routes.iter().flat_map(|(name, route)| {
+                                route.client_policies.bindings.iter().map(
+                                    |(binding_ref, binding)| {
+                                        (route_name(name), binding_ref, binding)
+                                    },
+                                )
+                            });
+                        let svc_policy_bindings = svc
+                            .client_policies
+                            .bindings
                             .iter()
-                            .map(|(&client_policy::PolicyRef { ref name, .. }, bound)| {
-                                use std::fmt::Write;
-                                let mut policies = String::new();
-                                for policy in bound.policies.iter() {
-                                    write!(&mut policies, "\n - {policy:?}");
-                                }
-                                format!("{name}: {:?}\n{policies}", bound.client_pod_selector)
-                            })
+                            .map(|(binding_ref, binding)| ("svc", binding_ref, binding));
+                        let bindings = svc_policy_bindings
+                            .chain(rt_policy_bindings)
+                            .map(
+                                |(kind, &client_policy::PolicyRef { ref name, .. }, bound)| {
+                                    use std::fmt::Write;
+                                    let mut policies = String::new();
+                                    for policy in bound.policies.iter() {
+                                        write!(&mut policies, "\n- policy: `{policy:?}`").unwrap();
+                                    }
+                                    format!(
+                                        "{kind}/{name}:\n- selector: `{:?}`{policies}",
+                                        bound.client_pod_selector
+                                    )
+                                },
+                            )
                             .collect::<Vec<_>>()
                             .join("\n");
 
                         svcs_by_addr.add_row(Row::from(vec![
                             Cell::new(&addr.to_string()),
                             Cell::new(svc.reference.to_string()),
-                            Cell::new(format!("{:?}", svc.fqdn)),
+                            Cell::new(svc.fqdn.as_ref().map(|s| s.as_ref()).unwrap_or("n/a")),
                             Cell::new(bindings),
                         ]));
                     }
 
                     let mut policies = Table::new();
                     policies
-                        .load_preset(UTF8_FULL)
+                        .load_preset(ASCII_MARKDOWN)
                         .set_content_arrangement(ContentArrangement::Dynamic)
                         .set_header(Row::from(vec![
                             "NAMESPACE",
                             "POLICY",
+                            "TARGET",
                             "FAILURE CLASSIFICATION",
                             "FILTERS",
                         ]));
@@ -239,13 +245,14 @@ impl Index {
                         policies.add_row(Row::from(vec![
                             Cell::new(&ns),
                             Cell::new(name),
-                            Cell::new(&format!("{:?}", policy.failure_classification)),
-                            Cell::new(format!("{:?}", policy.filters)),
+                            Cell::new(policy.target.to_string()),
+                            Cell::new(&format!("`{:?}`", policy.failure_classification)),
+                            Cell::new(format!("`{:?}`", policy.filters)),
                         ]));
                     }
-                    println!("{svcs_by_addr}\n{policies}");
-                    last_changed = index.changed;
+                    println!("\n{svcs_by_addr}\n\n{policies}\n");
                 }
+                changed.notified().await;
             }
         })
     }
@@ -255,21 +262,20 @@ impl LockedIndex {
     fn ns_with_reindex(&mut self, namespace: String, f: impl FnOnce(&mut Namespace) -> bool) {
         if let Entry::Occupied(mut ns) = self.namespaces.entry(namespace) {
             if f(ns.get_mut()) {
-                if ns.get().pods.is_empty() {
+                if ns.get().is_empty() {
                     ns.remove();
                 } else {
-                    ns.get_mut().reindex_policies(&self.client_policies);
+                    ns.get_mut().reindex(&self.client_policies);
                 }
-
-                self.changed = Instant::now();
+                self.changed.notify_one();
             }
         }
     }
 
-    fn ns_or_default(&mut self, namespace: String) -> &mut Namespace {
+    pub fn ns_or_default(&mut self, namespace: String) -> &mut Namespace {
         self.namespaces
             .entry(namespace.clone())
-            .or_insert_with(|| Namespace::new(namespace, &self.cluster_info))
+            .or_insert_with(|| Namespace::new(namespace))
     }
 
     fn ns_or_default_with_reindex(
@@ -280,21 +286,20 @@ impl LockedIndex {
         let ns = self
             .namespaces
             .entry(namespace.clone())
-            .or_insert_with(|| Namespace::new(namespace, &self.cluster_info));
+            .or_insert_with(|| Namespace::new(namespace));
         if f(ns) {
-            ns.reindex_policies(&self.client_policies);
-
-            self.changed = Instant::now();
+            ns.reindex(&self.client_policies);
+            self.changed.notify_one();
         }
     }
 
     fn reindex_all(&mut self) {
         tracing::debug!("Reindexing all namespaces");
         for ns in self.namespaces.values_mut() {
-            ns.reindex_policies(&self.client_policies);
+            ns.reindex(&self.client_policies);
         }
 
-        self.changed = Instant::now();
+        self.changed.notify_one();
     }
 }
 
@@ -346,7 +351,7 @@ impl kubert::index::IndexNamespacedResource<Service> for LockedIndex {
         let ns = svc.namespace().expect("service must be namespaced");
         let name = svc.name_unchecked();
         let _span = tracing::info_span!("apply", %ns, %name).entered();
-        let svc = match OutboundService::from_resource(&self.cluster_info, ns.clone(), svc) {
+        let svc = match OutboundService::from_resource(self, ns.clone(), svc) {
             Ok(svc) => svc,
             Err(error) => {
                 tracing::warn!(%error, "invalid Service");
@@ -364,6 +369,7 @@ impl kubert::index::IndexNamespacedResource<Service> for LockedIndex {
                     }
                 }
             }
+            self.changed.notify_one();
         }
     }
 
@@ -380,18 +386,20 @@ impl kubert::index::IndexNamespacedResource<Service> for LockedIndex {
                     tracing::info!("namespace empty");
                     entry.remove();
                 }
+
+                self.changed.notify_one();
             }
         }
     }
 
     fn reset(&mut self, svcs: Vec<Service>, deleted: HashMap<String, AHashSet<String>>) {
         let _span = tracing::info_span!("reset").entered();
-
+        let mut changed = false;
         for svc in svcs.into_iter() {
             let ns = svc.namespace().expect("service must be namespaced");
             let name = svc.name_unchecked();
             let _span = tracing::info_span!("apply", %ns, %name).entered();
-            let svc = match OutboundService::from_resource(&self.cluster_info, ns.clone(), svc) {
+            let svc = match OutboundService::from_resource(self, ns.clone(), svc) {
                 Ok(svc) => svc,
                 Err(error) => {
                     tracing::warn!(%error, "invalid Service");
@@ -409,6 +417,7 @@ impl kubert::index::IndexNamespacedResource<Service> for LockedIndex {
                         }
                     }
                 }
+                changed = true;
             }
         }
         for (ns, names) in deleted.into_iter() {
@@ -431,8 +440,13 @@ impl kubert::index::IndexNamespacedResource<Service> for LockedIndex {
                         tracing::info!("namespace empty");
                         entry.remove();
                     }
+                    changed = true;
                 }
             }
+        }
+
+        if changed {
+            self.changed.notify_one();
         }
     }
 }
@@ -672,14 +686,14 @@ impl kubert::index::IndexNamespacedResource<ClientPolicyBinding> for LockedIndex
 }
 
 impl Namespace {
-    fn new(name: String, cluster: &Arc<ClusterInfo>) -> Self {
+    fn new(name: String) -> Self {
         let name = Arc::new(name);
         Self {
-            name: name.clone(),
-            pods: HashMap::default(),
+            name,
+            // pods: HashMap::default(),
             policies: PolicyIndex {
-                namespace: name,
-                cluster_info: cluster.clone(),
+                // namespace: name,
+                // cluster_info: cluster.clone(),
                 services: HashMap::default(),
                 http_routes: HashMap::default(),
             },
@@ -687,21 +701,28 @@ impl Namespace {
     }
 
     fn is_empty(&self) -> bool {
-        self.pods.is_empty() && self.policies.is_empty()
+        // self.pods.is_empty() &&
+        self.policies.is_empty()
     }
 
-    fn reindex_policies(&mut self, client_policies: &ClientPolicyNsIndex) {
-        let _span = tracing::info_span!("reindex_policies", ns = %self.name).entered();
+    fn reindex(&mut self, client_policies: &ClientPolicyNsIndex) -> bool {
+        let _span = tracing::info_span!("reindex", ns = %self.name).entered();
+        let mut changed = false;
         for (name, svc) in &mut self.policies.services {
+            let _span = tracing::info_span!("service", message = %name).entered();
             svc.send_if_modified(|svc| {
-                if svc.reindex_policies(client_policies) {
-                    tracing::info!(service = %name, "reindexed policies for");
+                let routes_changed = svc.reindex_routes(&self.policies.http_routes);
+                let policies_changed = svc.reindex_policies(client_policies);
+                if routes_changed || policies_changed {
+                    tracing::info!("reindexed service");
+                    changed = true;
                     true
                 } else {
                     false
                 }
             });
         }
+        changed
     }
 
     // fn update_pod(
@@ -1010,7 +1031,9 @@ impl PolicyIndex {
 
                 tracing::debug!(?service, "updating");
                 let rx = entry.subscribe();
-                entry.send(service);
+                entry
+                    .send(service)
+                    .expect("we just created an rx, this cannot fail");
                 Some(rx)
             }
         }
@@ -1160,34 +1183,23 @@ impl PolicyIndex {
 // === impl ClientPolicyNsIndex ===
 
 impl ClientPolicyNsIndex {
-    /// Returns an iterator over all ClientPolicies in the index.
-    fn all_policies(&self) -> impl Iterator<Item = (&String, &client_policy::Spec)> + '_ {
-        self.by_ns.values().flat_map(|ns| ns.policies.iter())
-    }
-
     pub fn policies_for<'a>(
         &'a self,
-        service: &'a OutboundServiceRef,
+        target: client_policy::TargetRef<'a>,
     ) -> impl Iterator<Item = (client_policy::PolicyRef, &'a client_policy::Spec)> + 'a {
-        let service = match service {
-            OutboundServiceRef::Service { ns, name } => Some((ns, name)),
-            OutboundServiceRef::Default => None,
-        };
-        service.into_iter().flat_map(|(ns, svc)| {
-            self.by_ns.iter().flat_map(|(policy_ns, index)| {
-                index.policies.iter().filter_map(|(name, policy)| {
-                    if policy.selects_service(ns, svc) {
-                        Some((
-                            client_policy::PolicyRef {
-                                name: name.clone(),
-                                namespace: policy_ns.clone(),
-                            },
-                            policy,
-                        ))
-                    } else {
-                        None
-                    }
-                })
+        self.by_ns.iter().flat_map(move |(policy_ns, index)| {
+            index.policies.iter().filter_map(move |(name, policy)| {
+                if policy.selects(target) {
+                    Some((
+                        client_policy::PolicyRef {
+                            name: name.clone(),
+                            namespace: policy_ns.clone(),
+                        },
+                        policy,
+                    ))
+                } else {
+                    None
+                }
             })
         })
     }
@@ -1201,7 +1213,7 @@ impl ClientPolicyNsIndex {
                 let policies = binding
                     .policies
                     .iter()
-                    .filter_map(|policy| svc_policies.get(&policy).cloned())
+                    .filter_map(|policy| svc_policies.get(policy).cloned())
                     .collect::<Vec<_>>();
 
                 // no targets in this binding exist on this service.
@@ -1296,55 +1308,55 @@ impl<T> Default for NsUpdate<T> {
     }
 }
 
-impl ClusterInfo {
-    fn default_outbound_http_routes<'p>(
-        &self,
-        probe_paths: impl Iterator<Item = &'p str>,
-    ) -> HashMap<core::InboundHttpRouteRef, OutboundHttpRoute> {
-        use crate::route::*;
-        let mut routes = HashMap::with_capacity(2);
+// impl ClusterInfo {
+//     fn default_outbound_http_routes<'p>(
+//         &self,
+//         probe_paths: impl Iterator<Item = &'p str>,
+//     ) -> HashMap<core::InboundHttpRouteRef, OutboundHttpRoute> {
+//         use crate::route::*;
+//         let mut routes = HashMap::with_capacity(2);
 
-        // If no routes are defined for the server, use a default route that
-        // matches all requests. Default authorizations are instrumented on
-        // the server.
-        routes.insert(
-            core::InboundHttpRouteRef::Default("default"),
-            OutboundHttpRoute::default(),
-        );
+//         // If no routes are defined for the server, use a default route that
+//         // matches all requests. Default authorizations are instrumented on
+//         // the server.
+//         routes.insert(
+//             core::InboundHttpRouteRef::Default("default"),
+//             OutboundHttpRoute::default(),
+//         );
 
-        // If there are no probe networks, there are no probe routes to
-        // authorize.
-        if self.probe_networks.is_empty() {
-            return routes;
-        }
+//         // If there are no probe networks, there are no probe routes to
+//         // authorize.
+//         if self.probe_networks.is_empty() {
+//             return routes;
+//         }
 
-        // Generate an `Exact` path match for each probe path defined on the
-        // pod.
-        let matches: Vec<HttpRouteMatch> = probe_paths
-            .map(|path| HttpRouteMatch {
-                path: Some(PathMatch::Exact(path.to_string())),
-                headers: vec![],
-                query_params: vec![],
-                method: Some(Method::GET),
-            })
-            .collect();
+//         // Generate an `Exact` path match for each probe path defined on the
+//         // pod.
+//         let matches: Vec<HttpRouteMatch> = probe_paths
+//             .map(|path| HttpRouteMatch {
+//                 path: Some(PathMatch::Exact(path.to_string())),
+//                 headers: vec![],
+//                 query_params: vec![],
+//                 method: Some(Method::GET),
+//             })
+//             .collect();
 
-        // If there are no matches, then are no probe routes to authorize.
-        if matches.is_empty() {
-            return routes;
-        }
+//         // If there are no matches, then are no probe routes to authorize.
+//         if matches.is_empty() {
+//             return routes;
+//         }
 
-        let probe_route = OutboundHttpRoute {
-            hostnames: Vec::new(),
-            rules: vec![InboundHttpRouteRule {
-                matches,
-                filters: Vec::new(),
-            }],
-            creation_timestamp: None,
-            client_policy: None,
-        };
-        routes.insert(core::InboundHttpRouteRef::Default("probe"), probe_route);
+//         let probe_route = OutboundHttpRoute {
+//             hostnames: Vec::new(),
+//             rules: vec![InboundHttpRouteRule {
+//                 matches,
+//                 filters: Vec::new(),
+//             }],
+//             creation_timestamp: None,
+//             client_policies: Default::default(),
+//         };
+//         routes.insert(core::InboundHttpRouteRef::Default("probe"), probe_route);
 
-        routes
-    }
-}
+//         routes
+//     }
+// }

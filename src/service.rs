@@ -1,11 +1,10 @@
 use crate::{
-    client_policy::{self, PolicyRef},
-    core::{self, ProxyProtocol},
-    index, k8s, pod,
-    route::OutboundHttpRoute,
-    ClusterInfo,
+    client_policy::{self, PolicySet},
+    core::{self},
+    index, pod,
+    route::{self, OutboundHttpRoute},
 };
-use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use ahash::AHashMap as HashMap;
 use anyhow::{anyhow, bail, Context, Result};
 use k8s_openapi::api::core::v1::Service;
 use kube::ResourceExt;
@@ -26,8 +25,7 @@ pub struct OutboundService {
     pub cluster_addrs: Vec<SocketAddr>,
     pub ports: HashMap<String, ServicePort>,
     pub http_routes: HashMap<core::InboundHttpRouteRef, OutboundHttpRoute>,
-    pub client_policies: HashMap<PolicyRef, client_policy::Spec>,
-    pub client_bindings: HashMap<PolicyRef, client_policy::Bound>,
+    pub client_policies: PolicySet,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -35,14 +33,6 @@ pub enum OutboundServiceRef {
     Service { name: String, ns: String },
     Default,
 }
-
-// #[derive(Debug, Clone, PartialEq)]
-// pub struct Spec {
-//     pub fqdn: Arc<str>,
-//     pub labels: k8s::Labels,
-//     pub pod_selector: k8s::labels::Selector,
-//     pub ports: HashMap<String, ServicePort>,
-// }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ServicePort {
@@ -53,16 +43,9 @@ pub struct ServicePort {
 const OPAQUE_PORTS_ANNOTATION: &str = "config.linkerd.io/opaque-ports";
 
 impl OutboundService {
-    pub fn from_resource(config: &ClusterInfo, ns: String, svc: Service) -> Result<Self> {
+    pub fn from_resource(index: &mut index::LockedIndex, ns: String, svc: Service) -> Result<Self> {
         let name = svc.name_unchecked();
         let spec = svc.spec.ok_or_else(|| anyhow!("service has no spec"))?;
-        // let pod_selector = spec
-        //     .selector
-        //     .ok_or_else(|| {
-        //         anyhow!("service does not select any pods, not a valid target for client policy")
-        //     })?
-        //     .into_iter()
-        //     .collect();
         let opaque_ports = svc
             .metadata
             .annotations
@@ -104,84 +87,92 @@ impl OutboundService {
                 .collect()
         };
 
-        let fqdn = format!("{name}.{ns}.svc.{}", config.cluster_domain).into();
-        // let labels = svc.metadata.labels.into();
-
-        Ok(OutboundService {
-            reference: OutboundServiceRef::Service { name, ns },
+        let fqdn = format!("{name}.{ns}.svc.{}", index.cluster_info.cluster_domain).into();
+        let mut svc = OutboundService {
+            reference: OutboundServiceRef::Service {
+                name,
+                ns: ns.clone(),
+            },
             fqdn: Some(fqdn),
             ports,
             cluster_addrs,
             http_routes: Default::default(),
             client_policies: Default::default(),
-            client_bindings: Default::default(),
-        })
+        };
+        svc.reindex_routes(&index.ns_or_default(ns).policies.http_routes);
+        svc.reindex_policies(&index.client_policies);
+        Ok(svc)
     }
 
-    pub fn reindex_policies(&mut self, policies: &index::ClientPolicyNsIndex) -> bool {
+    pub fn reindex_policies(&mut self, index: &index::ClientPolicyNsIndex) -> bool {
+        let namespace = self.reference.namespace();
         let _span = tracing::info_span!(
             "reindex_policies",
-            service = %self.reference.name()
+            message = %self.reference.name()
         )
         .entered();
+
+        let mut changed = self.client_policies.reindex(
+            client_policy::TargetRef::Service {
+                name: self.reference.name(),
+                namespace,
+            },
+            index,
+        );
+
+        for (route_ref, route) in self.http_routes.iter_mut() {
+            let name = match route_ref {
+                core::InboundHttpRouteRef::Linkerd(ref name) => name.as_ref(),
+                core::InboundHttpRouteRef::Default(name) => *name,
+            };
+            let _span = tracing::debug_span!("reindex_route_policies", message = %name).entered();
+            changed |= route.client_policies.reindex(
+                client_policy::TargetRef::HttpRoute { namespace, name },
+                index,
+            );
+        }
+
+        tracing::info!(changed, "reindexed service policies");
+        changed
+    }
+
+    pub fn reindex_routes<'r>(
+        &mut self,
+        routes: impl IntoIterator<Item = (&'r String, &'r route::OutboundRouteBinding)> + 'r,
+    ) -> bool {
+        let name = self.reference.name();
+        let _span = tracing::info_span!("reindex_routes", message = %name).entered();
+
         let mut changed = false;
-
-        let mut unmatched_policies = self.client_policies.keys().cloned().collect::<HashSet<_>>();
-        for (policy, spec) in policies.policies_for(&self.reference) {
-            let _span = tracing::debug_span!("policy", policy.ns = %policy.namespace, message = %policy.name).entered();
-            unmatched_policies.remove(&policy);
-            match self.client_policies.entry(policy) {
-                Entry::Occupied(mut entry) => {
-                    if entry.get() != spec {
-                        tracing::debug!("updated policy");
-                        entry.insert(spec.clone());
+        for (route_name, route) in routes {
+            let _span = tracing::debug_span!("route", message = %route_name).entered();
+            if route.selects_service(name) {
+                tracing::debug!("route selects service");
+                match self
+                    .http_routes
+                    .entry(core::InboundHttpRouteRef::Linkerd(route_name.clone()))
+                {
+                    Entry::Occupied(mut entry) => {
+                        if entry.get() == &route.route {
+                            tracing::debug!("route unchanged");
+                        } else {
+                            tracing::debug!("route updated");
+                            entry.insert(route.route.clone());
+                            changed = true;
+                        }
+                    }
+                    Entry::Vacant(entry) => {
+                        tracing::debug!("route added");
+                        entry.insert(route.route.clone());
                         changed = true;
                     }
                 }
-                Entry::Vacant(entry) => {
-                    tracing::debug!("added policy");
-                    entry.insert(spec.clone());
-                    changed = true;
-                }
+            } else {
+                tracing::debug!("route does not select service");
             }
         }
 
-        for policy in unmatched_policies {
-            tracing::debug!(policy.ns = %policy.namespace, %policy.name, "removed policy");
-            self.client_policies.remove(&policy);
-            changed = true;
-        }
-
-        let mut unmatched_bindings = self.client_bindings.keys().cloned().collect::<HashSet<_>>();
-        for (binding, spec) in policies.bindings_for(&self.client_policies) {
-            let _span = tracing::debug_span!("binding", binding.ns = %binding.namespace, message = %binding.name).entered();
-            unmatched_bindings.remove(&binding);
-            match self.client_bindings.entry(binding) {
-                Entry::Occupied(mut entry) => {
-                    if entry.get() != &spec {
-                        tracing::debug!("updated policy binding");
-                        entry.insert(spec);
-                        changed = true;
-                    }
-                }
-                Entry::Vacant(entry) => {
-                    tracing::debug!("added policy binding");
-                    entry.insert(spec);
-                    changed = true;
-                }
-            }
-        }
-
-        for binding in unmatched_bindings {
-            tracing::debug!(binding.ns = %binding.namespace, %binding.name, "removed policy binding");
-            self.client_bindings.remove(&binding);
-            changed = true;
-        }
-
-        if !changed {
-            tracing::debug!("no changes");
-        }
-
+        tracing::info!(changed, "reindexed service HTTPRoutes");
         changed
     }
 }
