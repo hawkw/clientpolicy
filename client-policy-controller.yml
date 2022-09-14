@@ -96,9 +96,9 @@ rules:
       - policy.linkerd.io
     resources:
       - authorizationpolicies
-      - clientpolicies
       - clientpolicybindings
       - httproutes
+      - httpclientpolicies
       - servers
     verbs:
       - get

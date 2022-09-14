@@ -8,7 +8,7 @@ use crate::{
 };
 use ahash::{AHashMap, AHashSet};
 use anyhow::{anyhow, Result};
-use client_policy_k8s_api::client_policy::ClientPolicy;
+use client_policy_k8s_api::client_policy::HttpClientPolicy;
 use futures::TryFutureExt;
 use k8s_openapi::api::core::v1::Service;
 use kubert::client::api::ListParams;
@@ -135,7 +135,7 @@ impl Index {
         let pods = self.index_pods(rt);
         let services = self.index_resource::<Service>(rt);
         let routes = self.index_resource::<k8s::policy::HttpRoute>(rt);
-        let policies = self.index_resource::<ClientPolicy>(rt);
+        let policies = self.index_resource::<HttpClientPolicy>(rt);
         async move {
             tokio::try_join! {
                 pods, services, routes, policies,
@@ -504,17 +504,17 @@ impl kubert::index::IndexNamespacedResource<k8s::policy::HttpRoute> for LockedIn
     }
 }
 
-impl kubert::index::IndexNamespacedResource<ClientPolicy> for LockedIndex {
-    fn apply(&mut self, policy: ClientPolicy) {
+impl kubert::index::IndexNamespacedResource<HttpClientPolicy> for LockedIndex {
+    fn apply(&mut self, policy: HttpClientPolicy) {
         let ns = policy
             .namespace()
-            .expect("ClientPolicy must have a namespace");
+            .expect("HttpClientPolicy must have a namespace");
         let name = policy.name_unchecked();
         let _span = tracing::info_span!("apply", %ns, %name).entered();
         let spec = match client_policy::Spec::try_from(policy) {
             Ok(spec) => spec,
             Err(error) => {
-                tracing::warn!(%error, "invalid ClientPolicy");
+                tracing::warn!(%error, "invalid HttpClientPolicy");
                 return;
             }
         };
@@ -524,18 +524,22 @@ impl kubert::index::IndexNamespacedResource<ClientPolicy> for LockedIndex {
         }
     }
 
-    fn reset(&mut self, policies: Vec<ClientPolicy>, deleted: kubert::index::NamespacedRemoved) {
+    fn reset(
+        &mut self,
+        policies: Vec<HttpClientPolicy>,
+        deleted: kubert::index::NamespacedRemoved,
+    ) {
         let _span = tracing::info_span!("reset").entered();
         let mut changed = false;
         for policy in policies.into_iter() {
             let ns = policy
                 .namespace()
-                .expect("ClientPolicy must have a namespace");
+                .expect("HttpClientPolicy must have a namespace");
             let name = policy.name_unchecked();
             let spec = match client_policy::Spec::try_from(policy) {
                 Ok(spec) => spec,
                 Err(error) => {
-                    tracing::warn!(%ns, %name, %error, "invalid ClientPolicy");
+                    tracing::warn!(%ns, %name, %error, "invalid HttpClientPolicy");
                     continue;
                 }
             };
@@ -546,10 +550,10 @@ impl kubert::index::IndexNamespacedResource<ClientPolicy> for LockedIndex {
             if let Entry::Occupied(mut ns) = self.client_policies.by_ns.entry(ns_name) {
                 for name in names.into_iter() {
                     ns.get_mut().policies.remove(&name);
-                    tracing::debug!(%name, "deleting ClientPolicy");
+                    tracing::debug!(%name, "deleting HttpClientPolicy");
                 }
                 if ns.get().is_empty() {
-                    tracing::debug!("namespace has no ClientPolicies, removing it");
+                    tracing::debug!("namespace has no HttpClientPolicies, removing it");
                     ns.remove();
                 }
             }
@@ -563,7 +567,7 @@ impl kubert::index::IndexNamespacedResource<ClientPolicy> for LockedIndex {
     #[tracing::instrument(skip(self), fields(%ns, %name))]
     fn delete(&mut self, ns: String, name: String) {
         if let Entry::Occupied(mut ns) = self.client_policies.by_ns.entry(ns) {
-            tracing::debug!("deleting ClientPolicy");
+            tracing::debug!("deleting HttpClientPolicy");
             ns.get_mut().policies.remove(&name);
             if ns.get().is_empty() {
                 tracing::debug!("namespace has no client policies, deleting it");
