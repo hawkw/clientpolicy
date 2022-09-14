@@ -1,10 +1,11 @@
 use crate::{
     core,
-    k8s::policy::{self, HttpRoute, NamespacedTargetRef},
+    k8s::policy::{HttpRoute, NamespacedTargetRef},
 };
 use anyhow::{anyhow, Context, Error};
 use client_policy_k8s_api::client_policy as k8s;
 pub use k8s::FailureClassification;
+use k8s_openapi::api;
 use kube::ResourceExt;
 use std::{convert::TryFrom, time::Duration};
 
@@ -18,8 +19,8 @@ pub struct Spec {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Target {
-    /// This policy's parent ref is a `Server`.
-    Server { name: String, namespace: String },
+    /// This policy's parent ref is a `Service`.
+    Service { name: String, namespace: String },
 
     /// This policy's parent ref is an `HTTPRoute`.
     HttpRoute { name: String, namespace: String },
@@ -35,17 +36,17 @@ pub enum Filter {
 impl Spec {
     pub fn target_ns(&self) -> &str {
         match self.target {
-            Target::Server { ref namespace, .. } => namespace,
+            Target::Service { ref namespace, .. } => namespace,
             Target::HttpRoute { ref namespace, .. } => namespace,
         }
     }
 
-    pub fn selects_server(&self, ns: &str, srv: &str) -> bool {
+    pub fn selects_service(&self, ns: &str, svc: &str) -> bool {
         match self.target {
-            Target::Server {
+            Target::Service {
                 ref namespace,
                 ref name,
-            } => ns == namespace && srv == name,
+            } => ns == namespace && svc == name,
             Target::HttpRoute { .. } => false,
         }
     }
@@ -97,7 +98,7 @@ impl TryFrom<k8s::ClientPolicy> for Spec {
 impl Target {
     fn try_from_target_ref(ns: String, target: NamespacedTargetRef) -> Result<Self, Error> {
         match target {
-            t if t.targets_kind::<policy::Server>() => Ok(Target::Server {
+            t if t.targets_kind::<api::core::v1::Service>() => Ok(Target::Service {
                 name: t.name,
                 namespace: t.namespace.unwrap_or(ns),
             }),
@@ -106,7 +107,7 @@ impl Target {
                 namespace: t.namespace.unwrap_or(ns),
             }),
             _ => Err(anyhow!(
-                "a ClientPolicy must target either a Server or an HTTPRoute"
+                "a ClientPolicy must target either a Service or an HTTPRoute"
             )),
         }
     }

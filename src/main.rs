@@ -15,7 +15,7 @@ mod defaults;
 pub mod index;
 mod pod;
 mod route;
-mod server;
+mod service;
 use ipnet::IpNet;
 
 #[derive(Clone, Debug)]
@@ -27,6 +27,8 @@ pub struct ClusterInfo {
     pub probe_networks: Vec<IpNet>,
 
     pub default_policy: defaults::DefaultPolicy,
+
+    pub cluster_domain: String,
 }
 
 #[derive(Parser)]
@@ -64,6 +66,10 @@ struct Args {
     /// enabled.
     #[clap(long)]
     dump_interval_secs: Option<u64>,
+
+    /// The cluster domain.
+    #[clap(long, default_value = "cluster.local")]
+    cluster_domain: String,
 }
 const DETECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -78,6 +84,7 @@ async fn main() -> Result<()> {
         probe_networks,
         dump_interval_secs,
         default_policy,
+        cluster_domain,
     } = Args::parse();
 
     let mut rt = kubert::Runtime::builder()
@@ -108,6 +115,7 @@ async fn main() -> Result<()> {
         probe_networks,
         default_detect_timeout: DETECT_TIMEOUT,
         default_policy,
+        cluster_domain,
     });
 
     let indices = index.spawn_index_tasks(&mut rt);
