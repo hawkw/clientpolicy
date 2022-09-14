@@ -1,40 +1,48 @@
 use crate::{
-    client_policy,
+    client_policy::{self, PolicyRef},
     core::{self, ProxyProtocol},
-    k8s, pod,
+    index, k8s, pod,
     route::OutboundHttpRoute,
     ClusterInfo,
 };
-use ahash::AHashMap;
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use anyhow::{anyhow, bail, Context, Result};
 use k8s_openapi::api::core::v1::Service;
 use kube::ResourceExt;
-use std::{collections::HashMap, num::NonZeroU16, sync::Arc};
+use std::{
+    collections::hash_map::Entry,
+    fmt,
+    net::{IpAddr, SocketAddr},
+    num::NonZeroU16,
+    sync::Arc,
+};
 
 /// Like `linkerd_policy_controller_core::InboundServer`, but...outbound.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutboundService {
     pub reference: OutboundServiceRef,
     pub fqdn: Option<Arc<str>>,
-
-    pub protocol: ProxyProtocol,
+    // pub protocol: ProxyProtocol,
+    pub cluster_addrs: Vec<SocketAddr>,
+    pub ports: HashMap<String, ServicePort>,
     pub http_routes: HashMap<core::InboundHttpRouteRef, OutboundHttpRoute>,
-    pub client_policy: Option<client_policy::Spec>,
+    pub client_policies: HashMap<PolicyRef, client_policy::Spec>,
+    pub client_bindings: HashMap<PolicyRef, client_policy::Bound>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum OutboundServiceRef {
-    Service(String),
+    Service { name: String, ns: String },
     Default,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Spec {
-    pub fqdn: Arc<str>,
-    pub labels: k8s::Labels,
-    pub pod_selector: k8s::labels::Selector,
-    pub ports: AHashMap<String, ServicePort>,
-}
+// #[derive(Debug, Clone, PartialEq)]
+// pub struct Spec {
+//     pub fqdn: Arc<str>,
+//     pub labels: k8s::Labels,
+//     pub pod_selector: k8s::labels::Selector,
+//     pub ports: HashMap<String, ServicePort>,
+// }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ServicePort {
@@ -44,17 +52,17 @@ pub struct ServicePort {
 
 const OPAQUE_PORTS_ANNOTATION: &str = "config.linkerd.io/opaque-ports";
 
-impl Spec {
-    pub fn from_resource(config: &ClusterInfo, ns: &String, svc: Service) -> Result<Self> {
+impl OutboundService {
+    pub fn from_resource(config: &ClusterInfo, ns: String, svc: Service) -> Result<Self> {
         let name = svc.name_unchecked();
         let spec = svc.spec.ok_or_else(|| anyhow!("service has no spec"))?;
-        let pod_selector = spec
-            .selector
-            .ok_or_else(|| {
-                anyhow!("service does not select any pods, not a valid target for client policy")
-            })?
-            .into_iter()
-            .collect();
+        // let pod_selector = spec
+        //     .selector
+        //     .ok_or_else(|| {
+        //         anyhow!("service does not select any pods, not a valid target for client policy")
+        //     })?
+        //     .into_iter()
+        //     .collect();
         let opaque_ports = svc
             .metadata
             .annotations
@@ -84,16 +92,97 @@ impl Spec {
                     .with_context(|| format!("invalid port {name}"))?;
                 Ok((name, port))
             })
-            .collect::<Result<AHashMap<_, _>>>()?;
-        let fqdn = format!("{name}.{ns}.svc.{}", config.cluster_domain).into();
-        let labels = svc.metadata.labels.into();
+            .collect::<Result<HashMap<_, _>>>()?;
+        let cluster_addrs = {
+            let cluster_ip = spec
+                .cluster_ip
+                .ok_or_else(|| anyhow!("client policy not supported for headless services"))?
+                .parse::<IpAddr>()?;
+            ports
+                .values()
+                .map(|port| SocketAddr::new(cluster_ip, port.number.into()))
+                .collect()
+        };
 
-        Ok(Self {
-            fqdn,
-            labels,
-            pod_selector,
+        let fqdn = format!("{name}.{ns}.svc.{}", config.cluster_domain).into();
+        // let labels = svc.metadata.labels.into();
+
+        Ok(OutboundService {
+            reference: OutboundServiceRef::Service { name, ns },
+            fqdn: Some(fqdn),
             ports,
+            cluster_addrs,
+            http_routes: Default::default(),
+            client_policies: Default::default(),
+            client_bindings: Default::default(),
         })
+    }
+
+    pub fn reindex_policies(&mut self, policies: &index::ClientPolicyNsIndex) -> bool {
+        let _span = tracing::info_span!(
+            "reindex_policies",
+            service = %self.reference.name()
+        )
+        .entered();
+        let mut changed = false;
+
+        let mut unmatched_policies = self.client_policies.keys().cloned().collect::<HashSet<_>>();
+        for (policy, spec) in policies.policies_for(&self.reference) {
+            let _span = tracing::debug_span!("policy", policy.ns = %policy.namespace, message = %policy.name).entered();
+            unmatched_policies.remove(&policy);
+            match self.client_policies.entry(policy) {
+                Entry::Occupied(mut entry) => {
+                    if entry.get() != spec {
+                        tracing::debug!("updated policy");
+                        entry.insert(spec.clone());
+                        changed = true;
+                    }
+                }
+                Entry::Vacant(entry) => {
+                    tracing::debug!("added policy");
+                    entry.insert(spec.clone());
+                    changed = true;
+                }
+            }
+        }
+
+        for policy in unmatched_policies {
+            tracing::debug!(policy.ns = %policy.namespace, %policy.name, "removed policy");
+            self.client_policies.remove(&policy);
+            changed = true;
+        }
+
+        let mut unmatched_bindings = self.client_bindings.keys().cloned().collect::<HashSet<_>>();
+        for (binding, spec) in policies.bindings_for(&self.client_policies) {
+            let _span = tracing::debug_span!("binding", binding.ns = %binding.namespace, message = %binding.name).entered();
+            unmatched_bindings.remove(&binding);
+            match self.client_bindings.entry(binding) {
+                Entry::Occupied(mut entry) => {
+                    if entry.get() != &spec {
+                        tracing::debug!("updated policy binding");
+                        entry.insert(spec);
+                        changed = true;
+                    }
+                }
+                Entry::Vacant(entry) => {
+                    tracing::debug!("added policy binding");
+                    entry.insert(spec);
+                    changed = true;
+                }
+            }
+        }
+
+        for binding in unmatched_bindings {
+            tracing::debug!(binding.ns = %binding.namespace, %binding.name, "removed policy binding");
+            self.client_bindings.remove(&binding);
+            changed = true;
+        }
+
+        if !changed {
+            tracing::debug!("no changes");
+        }
+
+        changed
     }
 }
 
@@ -126,10 +215,26 @@ fn parse_portset(s: &str) -> Result<pod::PortSet> {
 }
 
 impl OutboundServiceRef {
-    pub fn as_str(&self) -> &str {
+    pub fn namespace(&self) -> &str {
         match self {
-            Self::Service(name) => name.as_ref(),
+            Self::Service { ns, .. } => ns.as_ref(),
+            Self::Default => "n/a",
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Service { name, .. } => name.as_ref(),
             Self::Default => "default",
+        }
+    }
+}
+
+impl fmt::Display for OutboundServiceRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Service { name, ns } => write!(f, "{}/{}", ns, name),
+            Self::Default => write!(f, "default"),
         }
     }
 }

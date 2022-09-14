@@ -2,6 +2,7 @@ apiVersion: policy.linkerd.io/v1alpha1
 kind: ClientPolicyBinding
 metadata:
   name: authors
+  namespace: booksapp
 spec:
   policyRefs:
     - group: policy.linkerd.io

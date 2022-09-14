@@ -1,0 +1,15 @@
+---
+apiVersion: policy.linkerd.io/v1alpha1
+kind: ClientPolicyBinding
+metadata:
+  name: books
+spec:
+  policyRefs:
+    - group: policy.linkerd.io
+      kind: HTTPClientPolicy
+      namespace: booksapp
+      name: books
+  podSelector:
+    matchExpressions:
+      - { key: app, operator: NotIn, values: [] }
+
