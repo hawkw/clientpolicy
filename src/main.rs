@@ -62,10 +62,9 @@ struct Args {
     #[clap(long, default_value = "all-unauthenticated")]
     default_policy: defaults::DefaultPolicy,
 
-    /// Dump the current state of the index every `dump_interval_secs`, if
-    /// enabled.
+    /// Dump the current state of the index on changes, if enabled.
     #[clap(long)]
-    dump_interval_secs: Option<u64>,
+    dump_index: bool,
 
     /// The cluster domain.
     #[clap(long, default_value = "cluster.local")]
@@ -82,7 +81,7 @@ async fn main() -> Result<()> {
         admin,
         grpc_addr,
         probe_networks,
-        dump_interval_secs,
+        dump_index,
         default_policy,
         cluster_domain,
     } = Args::parse();
@@ -120,8 +119,8 @@ async fn main() -> Result<()> {
 
     let indices = index.spawn_index_tasks(&mut rt);
 
-    if let Some(secs) = dump_interval_secs {
-        index.dump_index(Duration::from_secs(secs));
+    if dump_index {
+        index.dump_index();
     }
 
     tracing::info!(%grpc_addr, "serving ClientPolicy gRPC API");

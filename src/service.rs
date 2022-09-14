@@ -1,39 +1,37 @@
 use crate::{
-    client_policy,
-    core::{self, ProxyProtocol},
-    k8s, pod,
-    route::OutboundHttpRoute,
-    ClusterInfo,
+    client_policy::{self, PolicySet},
+    core::{self},
+    index, pod,
+    route::{self, OutboundHttpRoute},
 };
-use ahash::AHashMap;
+use ahash::AHashMap as HashMap;
 use anyhow::{anyhow, bail, Context, Result};
 use k8s_openapi::api::core::v1::Service;
 use kube::ResourceExt;
-use std::{collections::HashMap, num::NonZeroU16, sync::Arc};
+use std::{
+    collections::hash_map::Entry,
+    fmt,
+    net::{IpAddr, SocketAddr},
+    num::NonZeroU16,
+    sync::Arc,
+};
 
 /// Like `linkerd_policy_controller_core::InboundServer`, but...outbound.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutboundService {
     pub reference: OutboundServiceRef,
     pub fqdn: Option<Arc<str>>,
-
-    pub protocol: ProxyProtocol,
+    // pub protocol: ProxyProtocol,
+    pub cluster_addrs: Vec<SocketAddr>,
+    pub ports: HashMap<String, ServicePort>,
     pub http_routes: HashMap<core::InboundHttpRouteRef, OutboundHttpRoute>,
-    pub client_policy: Option<client_policy::Spec>,
+    pub client_policies: PolicySet,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum OutboundServiceRef {
-    Service(String),
+    Service { name: String, ns: String },
     Default,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Spec {
-    pub fqdn: Arc<str>,
-    pub labels: k8s::Labels,
-    pub pod_selector: k8s::labels::Selector,
-    pub ports: AHashMap<String, ServicePort>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -44,17 +42,10 @@ pub struct ServicePort {
 
 const OPAQUE_PORTS_ANNOTATION: &str = "config.linkerd.io/opaque-ports";
 
-impl Spec {
-    pub fn from_resource(config: &ClusterInfo, ns: &String, svc: Service) -> Result<Self> {
+impl OutboundService {
+    pub fn from_resource(index: &mut index::LockedIndex, ns: String, svc: Service) -> Result<Self> {
         let name = svc.name_unchecked();
         let spec = svc.spec.ok_or_else(|| anyhow!("service has no spec"))?;
-        let pod_selector = spec
-            .selector
-            .ok_or_else(|| {
-                anyhow!("service does not select any pods, not a valid target for client policy")
-            })?
-            .into_iter()
-            .collect();
         let opaque_ports = svc
             .metadata
             .annotations
@@ -84,16 +75,105 @@ impl Spec {
                     .with_context(|| format!("invalid port {name}"))?;
                 Ok((name, port))
             })
-            .collect::<Result<AHashMap<_, _>>>()?;
-        let fqdn = format!("{name}.{ns}.svc.{}", config.cluster_domain).into();
-        let labels = svc.metadata.labels.into();
+            .collect::<Result<HashMap<_, _>>>()?;
+        let cluster_addrs = {
+            let cluster_ip = spec
+                .cluster_ip
+                .ok_or_else(|| anyhow!("client policy not supported for headless services"))?
+                .parse::<IpAddr>()?;
+            ports
+                .values()
+                .map(|port| SocketAddr::new(cluster_ip, port.number.into()))
+                .collect()
+        };
 
-        Ok(Self {
-            fqdn,
-            labels,
-            pod_selector,
+        let fqdn = format!("{name}.{ns}.svc.{}", index.cluster_info.cluster_domain).into();
+        let mut svc = OutboundService {
+            reference: OutboundServiceRef::Service {
+                name,
+                ns: ns.clone(),
+            },
+            fqdn: Some(fqdn),
             ports,
-        })
+            cluster_addrs,
+            http_routes: Default::default(),
+            client_policies: Default::default(),
+        };
+        svc.reindex_routes(&index.ns_or_default(ns).policies.http_routes);
+        svc.reindex_policies(&index.client_policies);
+        Ok(svc)
+    }
+
+    pub fn reindex_policies(&mut self, index: &index::ClientPolicyNsIndex) -> bool {
+        let namespace = self.reference.namespace();
+        let _span = tracing::info_span!(
+            "reindex_policies",
+            message = %self.reference.name()
+        )
+        .entered();
+
+        let mut changed = self.client_policies.reindex(
+            client_policy::TargetRef::Service {
+                name: self.reference.name(),
+                namespace,
+            },
+            index,
+        );
+
+        for (route_ref, route) in self.http_routes.iter_mut() {
+            let name = match route_ref {
+                core::InboundHttpRouteRef::Linkerd(ref name) => name.as_ref(),
+                core::InboundHttpRouteRef::Default(name) => *name,
+            };
+            let _span = tracing::debug_span!("reindex_route_policies", message = %name).entered();
+            changed |= route.client_policies.reindex(
+                client_policy::TargetRef::HttpRoute { namespace, name },
+                index,
+            );
+        }
+
+        tracing::info!(changed, "reindexed service policies");
+        changed
+    }
+
+    pub fn reindex_routes<'r>(
+        &mut self,
+        routes: impl IntoIterator<Item = (&'r String, &'r route::OutboundRouteBinding)> + 'r,
+    ) -> bool {
+        let name = self.reference.name();
+        let _span = tracing::info_span!("reindex_routes", message = %name).entered();
+
+        let mut changed = false;
+        for (route_name, route) in routes {
+            let _span = tracing::debug_span!("route", message = %route_name).entered();
+            if route.selects_service(name) {
+                tracing::debug!("route selects service");
+                match self
+                    .http_routes
+                    .entry(core::InboundHttpRouteRef::Linkerd(route_name.clone()))
+                {
+                    Entry::Occupied(mut entry) => {
+                        if entry.get() == &route.route {
+                            tracing::debug!("route unchanged");
+                        } else {
+                            tracing::debug!("route updated");
+                            entry.insert(route.route.clone());
+                            changed = true;
+                        }
+                    }
+                    Entry::Vacant(entry) => {
+                        tracing::debug!("route added");
+                        entry.insert(route.route.clone());
+                        changed = true;
+                    }
+                }
+            } else {
+                tracing::debug!("route does not select service");
+            }
+        }
+
+        tracing::info!(changed, "reindexed service HTTPRoutes");
+        changed
     }
 }
 
@@ -126,10 +206,26 @@ fn parse_portset(s: &str) -> Result<pod::PortSet> {
 }
 
 impl OutboundServiceRef {
-    pub fn as_str(&self) -> &str {
+    pub fn namespace(&self) -> &str {
         match self {
-            Self::Service(name) => name.as_ref(),
+            Self::Service { ns, .. } => ns.as_ref(),
+            Self::Default => "n/a",
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Service { name, .. } => name.as_ref(),
             Self::Default => "default",
+        }
+    }
+}
+
+impl fmt::Display for OutboundServiceRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Service { name, ns } => write!(f, "{}/{}", ns, name),
+            Self::Default => write!(f, "default"),
         }
     }
 }
