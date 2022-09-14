@@ -1,51 +1,43 @@
-pub use crate::core::http_route::*;
-use crate::k8s::{
-    self,
-    policy::{httproute as policy, Server},
+pub(crate) use crate::core::http_route::*;
+use crate::{
+    client_policy,
+    k8s::{self, policy::httproute as policy},
 };
 use anyhow::{anyhow, Error, Result};
 use chrono::{offset::Utc, DateTime};
 use k8s_gateway_api as api;
+use k8s_openapi::api::core::v1::Service;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct OutboundHttpRoute {
     pub hostnames: Vec<HostMatch>,
     // TODO(eliza): need a separate outbound rule type eventually...
     pub rules: Vec<InboundHttpRouteRule>,
+    pub client_policy: Option<client_policy::Spec>,
 
     /// This is required for ordering returned `HttpRoute`s by their creation
     /// timestamp.
     pub creation_timestamp: Option<DateTime<Utc>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OutboundRouteBinding {
     pub parents: Vec<OutboundParentRef>,
     pub route: OutboundHttpRoute,
 }
 
-impl Default for OutboundHttpRoute {
-    fn default() -> Self {
-        Self {
-            hostnames: Vec::new(),
-            rules: Vec::new(),
-            creation_timestamp: None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OutboundParentRef {
-    Server(String),
+    Service(String),
 }
 
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum InvalidParentRef {
-    #[error("HTTPRoute resource does not reference a Server resource")]
-    DoesNotSelectServer,
+    #[error("HTTPRoute resource does not reference a Service resource")]
+    DoesNotSelectService,
 
-    #[error("HTTPRoute resource may not reference a parent Server in an other namespace")]
-    ServerInAnotherNamespace,
+    #[error("HTTPRoute resource may not reference a parent Service in an other namespace")]
+    ServiceInAnotherNamespace,
 
     #[error("HTTPRoute resource may not reference a parent by port")]
     SpecifiesPort,
@@ -83,6 +75,7 @@ impl TryFrom<policy::HttpRoute> for OutboundRouteBinding {
                 hostnames,
                 rules,
                 creation_timestamp,
+                client_policy: None,
             },
         })
     }
@@ -90,10 +83,10 @@ impl TryFrom<policy::HttpRoute> for OutboundRouteBinding {
 
 impl OutboundRouteBinding {
     #[inline]
-    pub fn selects_server(&self, name: &str) -> bool {
+    pub fn selects_service(&self, name: &str) -> bool {
         self.parents
             .iter()
-            .any(|p| matches!(p, OutboundParentRef::Server(n) if n == name))
+            .any(|p| matches!(p, OutboundParentRef::Service(n) if n == name))
     }
 
     fn try_rule<F>(
@@ -166,7 +159,7 @@ impl OutboundParentRef {
 
         // If there are no valid parents, then the route is invalid.
         if parents.is_empty() {
-            return Err(InvalidParentRef::DoesNotSelectServer);
+            return Err(InvalidParentRef::DoesNotSelectService);
         }
 
         Ok(parents)
@@ -176,8 +169,8 @@ impl OutboundParentRef {
         route_ns: Option<&str>,
         parent_ref: api::ParentReference,
     ) -> Option<Result<Self, InvalidParentRef>> {
-        // Skip parent refs that don't target a `Server` resource.
-        if !policy::parent_ref_targets_kind::<Server>(&parent_ref) || parent_ref.name.is_empty() {
+        // Skip parent refs that don't target a `Service` resource.
+        if !policy::parent_ref_targets_kind::<Service>(&parent_ref) || parent_ref.name.is_empty() {
             return None;
         }
 
@@ -191,7 +184,7 @@ impl OutboundParentRef {
         } = parent_ref;
 
         if namespace.is_some() && namespace.as_deref() != route_ns {
-            return Some(Err(InvalidParentRef::ServerInAnotherNamespace));
+            return Some(Err(InvalidParentRef::ServiceInAnotherNamespace));
         }
         if port.is_some() {
             return Some(Err(InvalidParentRef::SpecifiesPort));
@@ -200,7 +193,7 @@ impl OutboundParentRef {
             return Some(Err(InvalidParentRef::SpecifiesSection));
         }
 
-        Some(Ok(OutboundParentRef::Server(name)))
+        Some(Ok(OutboundParentRef::Service(name)))
     }
 }
 

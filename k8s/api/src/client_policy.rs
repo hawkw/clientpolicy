@@ -6,25 +6,25 @@ use linkerd_policy_controller_k8s_api::policy::NamespacedTargetRef;
 #[kube(
     group = "policy.linkerd.io",
     version = "v1alpha1",
-    kind = "ClientPolicy",
+    kind = "HttpClientPolicy",
     namespaced
 )]
 #[serde(rename_all = "camelCase")]
-pub struct ClientPolicySpec {
+pub struct HttpClientPolicySpec {
     pub target_ref: NamespacedTargetRef,
-    pub failure_classification: FailureClassification,
-    pub filters: Vec<ClientPolicyFilter>,
+    pub failure_classification: HttpFailureClassification,
+    pub filters: Vec<HttpClientPolicyFilter>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct FailureClassification {
+pub struct HttpFailureClassification {
     pub statuses: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "PascalCase")]
-pub enum ClientPolicyFilter {
+pub enum HttpClientPolicyFilter {
     // TODO: Add more filter varients
     Timeout { timeout: String },
 }

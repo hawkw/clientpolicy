@@ -5,19 +5,19 @@ metadata:
 spec:
   policyRefs:
     - group: policy.linkerd.io
-      kind: ClientPolicy
+      kind: HTTPClientPolicy
       namespace: booksapp
       name: authors-get
     - group: policy.linkerd.io
-      kind: ClientPolicy
+      kind: HTTPClientPolicy
       namespace: booksapp
       name: authors-delete
     - group: policy.linkerd.io
-      kind: ClientPolicy
+      kind: HTTPClientPolicy
       namespace: booksapp
       name: books-get
     - group: policy.linkerd.io
-      kind: ClientPolicy
+      kind: HTTPClientPolicy
       namespace: booksapp
       name: books-delete
   podSelector:

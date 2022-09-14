@@ -1,18 +1,18 @@
 apiVersion: policy.linkerd.io/v1alpha1
-kind: HTTPClientPolicy
+kind: ClientPolicy
 metadata:
-  name: authors-get
+  name: books
 spec:
   targetRef:
-    name: authors-get-route
-    kind: HTTPRoute
-    group: policy.linkerd.io
+    name: books
+    kind: Service
     namespace: booksapp
   failureClassification:
     statuses:
       - "401"
       - "402"
+      - "503"
       - "500-599"
   filters:
     - type: Timeout
-      timeout: 500ms
+      timeout: 1s

@@ -5,16 +5,17 @@ use crate::index::Index;
 use anyhow::Result;
 use clap::Parser;
 use client_policy_k8s_api::{
-    client_policy::ClientPolicy, client_policy_binding::ClientPolicyBinding,
+    client_policy::HttpClientPolicy, client_policy_binding::ClientPolicyBinding,
 };
 use std::net::SocketAddr;
 use std::time::Duration;
 
+mod client_policy;
 mod defaults;
 pub mod index;
 mod pod;
 mod route;
-mod server;
+mod service;
 use ipnet::IpNet;
 
 #[derive(Clone, Debug)]
@@ -26,6 +27,8 @@ pub struct ClusterInfo {
     pub probe_networks: Vec<IpNet>,
 
     pub default_policy: defaults::DefaultPolicy,
+
+    pub cluster_domain: String,
 }
 
 #[derive(Parser)]
@@ -63,6 +66,10 @@ struct Args {
     /// enabled.
     #[clap(long)]
     dump_interval_secs: Option<u64>,
+
+    /// The cluster domain.
+    #[clap(long, default_value = "cluster.local")]
+    cluster_domain: String,
 }
 const DETECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -77,6 +84,7 @@ async fn main() -> Result<()> {
         probe_networks,
         dump_interval_secs,
         default_policy,
+        cluster_domain,
     } = Args::parse();
 
     let mut rt = kubert::Runtime::builder()
@@ -88,11 +96,11 @@ async fn main() -> Result<()> {
 
     let client = rt.client();
 
-    let client_policies = kube::Api::<ClientPolicy>::all(client.clone())
+    let client_policies = kube::Api::<HttpClientPolicy>::all(client.clone())
         .list(&kube::api::ListParams::default())
         .await?;
     for client_policy in client_policies.items.into_iter() {
-        tracing::info!(?client_policy, "Look at this cool policy!");
+        tracing::info!(?client_policy, "Look at this cool HTTP policy!");
     }
 
     let client_policy_bindings = kube::Api::<ClientPolicyBinding>::all(client)
@@ -107,11 +115,10 @@ async fn main() -> Result<()> {
         probe_networks,
         default_detect_timeout: DETECT_TIMEOUT,
         default_policy,
+        cluster_domain,
     });
 
-    index.index_pods(&mut rt);
-    index.index_servers(&mut rt);
-    index.index_http_routes(&mut rt);
+    let indices = index.spawn_index_tasks(&mut rt);
 
     if let Some(secs) = dump_interval_secs {
         index.dump_index(Duration::from_secs(secs));
@@ -121,6 +128,7 @@ async fn main() -> Result<()> {
 
     // Run the Kubert indexers.
     rt.run().await?;
+    indices.await?;
 
     Ok(())
 }
