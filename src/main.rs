@@ -12,6 +12,7 @@ use std::time::Duration;
 
 mod client_policy;
 mod defaults;
+mod grpc;
 pub mod index;
 mod pod;
 mod route;
@@ -123,11 +124,18 @@ async fn main() -> Result<()> {
         index.dump_index();
     }
 
-    tracing::info!(%grpc_addr, "serving ClientPolicy gRPC API");
+    let grpc = {
+        tracing::info!(%grpc_addr, "serving ClientPolicy gRPC API");
+        let server = tonic::transport::Server::builder()
+            .add_service(grpc::Server::new(index))
+            .serve(grpc_addr);
+        tokio::spawn(server)
+    };
 
     // Run the Kubert indexers.
     rt.run().await?;
     indices.await?;
+    grpc.await?;
 
     Ok(())
 }

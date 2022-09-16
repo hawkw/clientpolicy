@@ -1,21 +1,16 @@
-// use crate::k8s;
-// use ahash::AHashMap;
-// use anyhow::{bail, Context, Result};
+use crate::k8s;
 use std::{
     collections::HashSet,
     hash::{BuildHasherDefault, Hasher},
     num::NonZeroU16,
 };
 
-// /// Holds pod metadata/config that can change.
-// #[derive(Debug, PartialEq)]
-// pub(crate) struct Meta {
-//     /// The pod's labels. Used by `Server` pod selectors.
-//     pub labels: k8s::Labels,
-
-//     // Pod-specific settings (i.e., derived from annotations).
-//     pub settings: Settings,
-// }
+/// Holds pod metadata
+#[derive(Debug, PartialEq)]
+pub(crate) struct Meta {
+    /// The pod's labels. Used by `Server` pod selectors.
+    pub labels: k8s::Labels,
+}
 
 // /// Per-pod settings, as configured by the pod's annotations.
 // #[derive(Debug, Default, PartialEq)]
@@ -48,16 +43,13 @@ pub(crate) struct PortHasher(u16);
 
 // === impl Meta ===
 
-// impl Meta {
-//     pub(crate) fn from_metadata(meta: k8s::ObjectMeta) -> Self {
-//         let settings = Settings::from_metadata(&meta);
-//         tracing::trace!(?settings);
-//         Self {
-//             settings,
-//             labels: meta.labels.into(),
-//         }
-//     }
-// }
+impl Meta {
+    pub(crate) fn from_metadata(meta: k8s::ObjectMeta) -> Self {
+        Self {
+            labels: meta.labels.into(),
+        }
+    }
+}
 
 // === impl PortHasher ===
 
