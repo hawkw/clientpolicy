@@ -23,21 +23,22 @@ pub struct OutboundService {
     pub fqdn: Option<Arc<str>>,
     // pub protocol: ProxyProtocol,
     pub cluster_addrs: Vec<SocketAddr>,
-    pub ports: HashMap<String, ServicePort>,
+    pub(crate) port_names: pod::PortMap<String>,
+    pub(crate) opaque_ports: pod::PortSet,
     pub http_routes: HashMap<core::InboundHttpRouteRef, OutboundHttpRoute>,
     // client policies by port name
     pub client_policies: HashMap<String, PolicySet>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OutboundServiceRef {
     Service { name: String, ns: String },
     Default,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServicePort {
-    pub number: NonZeroU16,
+    pub name: String,
     pub opaque: bool,
 }
 
@@ -59,7 +60,7 @@ impl OutboundService {
                 })
             })
             .unwrap_or_default();
-        let ports = spec
+        let port_names = spec
             .ports
             .ok_or_else(|| anyhow!("service does not have any ports"))?
             .into_iter()
@@ -68,23 +69,20 @@ impl OutboundService {
                 let port = u16::try_from(port.port)
                     .map_err(anyhow::Error::from)
                     .and_then(|port| {
-                        let number = NonZeroU16::new(port)
-                            .ok_or_else(|| anyhow!("0 is not a valid port!"))?;
-                        let opaque = opaque_ports.contains(&number);
-                        Ok(ServicePort { number, opaque })
+                        NonZeroU16::new(port).ok_or_else(|| anyhow!("0 is not a valid port!"))
                     })
                     .with_context(|| format!("invalid port {name}"))?;
-                Ok((name, port))
+                Ok((port, name))
             })
-            .collect::<Result<HashMap<_, _>>>()?;
+            .collect::<Result<pod::PortMap<_>>>()?;
         let cluster_addrs = {
             let cluster_ip = spec
                 .cluster_ip
                 .ok_or_else(|| anyhow!("client policy not supported for headless services"))?
                 .parse::<IpAddr>()?;
-            ports
-                .values()
-                .map(|port| SocketAddr::new(cluster_ip, port.number.into()))
+            port_names
+                .keys()
+                .map(|&port| SocketAddr::new(cluster_ip, port.into()))
                 .collect()
         };
 
@@ -95,7 +93,8 @@ impl OutboundService {
                 ns: ns.clone(),
             },
             fqdn: Some(fqdn),
-            ports,
+            port_names,
+            opaque_ports,
             cluster_addrs,
             http_routes: Default::default(),
             client_policies: Default::default(),

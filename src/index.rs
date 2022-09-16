@@ -18,7 +18,9 @@ use k8s_openapi::{
 };
 use kubert::client::api::ListParams;
 use parking_lot::RwLock;
-use std::{collections::hash_map::Entry, future::Future, net::SocketAddr, sync::Arc};
+use std::{
+    collections::hash_map::Entry, future::Future, net::SocketAddr, num::NonZeroU16, sync::Arc,
+};
 use tokio::sync::{watch, Notify};
 use tracing::Instrument;
 
@@ -208,10 +210,12 @@ impl Index {
                                     },
                                 )
                             });
-                        let svc_policy_bindings = svc
-                            .client_policies
-                            .bindings
-                            .iter()
+                        let port = NonZeroU16::new(addr.port()).expect("port must be nonzero");
+                        let port_name = svc.port_names.get(&port);
+                        let svc_policy_bindings = port_name
+                            .and_then(|port_name| svc.client_policies.get(port_name))
+                            .into_iter()
+                            .flat_map(|policies| policies.bindings.iter())
                             .map(|(binding_ref, binding)| ("svc", binding_ref, binding));
                         let bindings = svc_policy_bindings
                             .chain(rt_policy_bindings)
