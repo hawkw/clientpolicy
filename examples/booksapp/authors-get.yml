@@ -12,6 +12,7 @@ spec:
     - name: authors
       kind: Service
       group: core
+      port: service
   rules:
     - matches:
       - path:
