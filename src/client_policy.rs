@@ -1,9 +1,6 @@
 use crate::{
     core, index,
-    k8s::{
-        self,
-        policy::{HttpRoute, NamespacedTargetRef},
-    },
+    k8s::{self, policy::HttpRoute},
 };
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use anyhow::{anyhow, ensure, Context, Error};
@@ -11,6 +8,7 @@ pub use client_policy::HttpFailureClassification;
 use client_policy_k8s_api::{
     client_policy::{self, HttpClientPolicy},
     client_policy_binding::ClientPolicyBinding,
+    NamespacedTargetRef,
 };
 use k8s_openapi::api;
 use kube::ResourceExt;
@@ -54,7 +52,11 @@ pub struct PolicyRef {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Target {
     /// This policy's parent ref is a `Service`.
-    Service { name: String, namespace: String },
+    Service {
+        name: String,
+        namespace: String,
+        port: String,
+    },
 
     /// This policy's parent ref is an `HTTPRoute`.
     HttpRoute { name: String, namespace: String },
@@ -63,7 +65,11 @@ pub enum Target {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum TargetRef<'a> {
     /// This policy's parent ref is a `Service`.
-    Service { name: &'a str, namespace: &'a str },
+    Service {
+        name: &'a str,
+        namespace: &'a str,
+        port: &'a str,
+    },
 
     /// This policy's parent ref is an `HTTPRoute`.
     HttpRoute { name: &'a str, namespace: &'a str },
@@ -90,12 +96,14 @@ impl Spec {
                 TargetRef::Service {
                     name: n,
                     namespace: ns,
+                    port: p,
                 },
                 Target::Service {
                     ref name,
                     ref namespace,
+                    ref port,
                 },
-            ) => name == n && namespace == ns,
+            ) => name == n && namespace == ns && port == p,
             (
                 TargetRef::HttpRoute {
                     name: n,
@@ -107,30 +115,6 @@ impl Spec {
                 },
             ) => name == n && namespace == ns,
             _ => false,
-        }
-    }
-
-    pub fn selects_service(&self, ns: &str, svc: &str) -> bool {
-        match self.target {
-            Target::Service {
-                ref namespace,
-                ref name,
-            } => ns == namespace && svc == name,
-            Target::HttpRoute { .. } => false,
-        }
-    }
-
-    pub fn selects_route(&self, ns: &str, route: &core::InboundHttpRouteRef) -> bool {
-        match (&self.target, route) {
-            (
-                Target::HttpRoute {
-                    ref namespace,
-                    ref name,
-                },
-                core::InboundHttpRouteRef::Linkerd(route),
-            ) => ns == namespace && route == name,
-            // TODO(eliza): should we allow a ClientPolicy to target a default route?
-            (_, _) => false,
         }
     }
 }
@@ -191,10 +175,14 @@ impl TryFrom<ClientPolicyBinding> for Binding {
 impl Target {
     fn try_from_target_ref(ns: String, target: NamespacedTargetRef) -> Result<Self, Error> {
         match target {
-            t if t.targets_kind::<api::core::v1::Service>() => Ok(Target::Service {
-                name: t.name,
-                namespace: t.namespace.unwrap_or(ns),
-            }),
+            t if t.targets_kind::<api::core::v1::Service>() => {
+                let port = t.port.ok_or_else(|| anyhow!("a ClientPolicy targeting a Service must include the target port in its targetRef"))?;
+                Ok(Target::Service {
+                    name: t.name,
+                    namespace: t.namespace.unwrap_or(ns),
+                    port,
+                })
+            }
             t if t.targets_kind::<HttpRoute>() => Ok(Target::HttpRoute {
                 name: t.name,
                 namespace: t.namespace.unwrap_or(ns),
@@ -289,8 +277,12 @@ impl PolicySet {
 impl fmt::Display for Target {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Target::Service { name, namespace } => write!(f, "Service {}/{}", namespace, name),
-            Target::HttpRoute { name, namespace } => write!(f, "HTTPRoute {}/{}", namespace, name),
+            Target::Service {
+                name,
+                namespace,
+                port,
+            } => write!(f, "Service {namespace}/{name}:{port}"),
+            Target::HttpRoute { name, namespace } => write!(f, "HTTPRoute {namespace}/{name}"),
         }
     }
 }

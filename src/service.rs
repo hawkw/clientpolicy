@@ -25,7 +25,8 @@ pub struct OutboundService {
     pub cluster_addrs: Vec<SocketAddr>,
     pub ports: HashMap<String, ServicePort>,
     pub http_routes: HashMap<core::InboundHttpRouteRef, OutboundHttpRoute>,
-    pub client_policies: PolicySet,
+    // client policies by port name
+    pub client_policies: HashMap<String, PolicySet>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -112,20 +113,23 @@ impl OutboundService {
         )
         .entered();
 
-        let mut changed = self.client_policies.reindex(
-            client_policy::TargetRef::Service {
+        let mut changed = false;
+        for (port, policies) in self.client_policies.iter_mut() {
+            let _span = tracing::debug_span!("port", message = %port).entered();
+            let target = client_policy::TargetRef::Service {
                 name: self.reference.name(),
                 namespace,
-            },
-            index,
-        );
+                port,
+            };
+            changed |= policies.reindex(target, index);
+        }
 
         for (route_ref, route) in self.http_routes.iter_mut() {
             let name = match route_ref {
                 core::InboundHttpRouteRef::Linkerd(ref name) => name.as_ref(),
                 core::InboundHttpRouteRef::Default(name) => *name,
             };
-            let _span = tracing::debug_span!("reindex_route_policies", message = %name).entered();
+            let _span = tracing::debug_span!("route", message = %name).entered();
             changed |= route.client_policies.reindex(
                 client_policy::TargetRef::HttpRoute { namespace, name },
                 index,
