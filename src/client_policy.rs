@@ -157,7 +157,7 @@ impl TryFrom<ClientPolicyBinding> for Binding {
             .ok_or_else(|| anyhow!("ClientPolicyBinding must be namespaced"))?;
         let name = binding.name_unchecked();
         let policy_refs = binding.spec.policy_refs.into_iter().map(|policy_ref| {
-            ensure!(policy_ref.targets_kind::<HttpClientPolicy>(), "ClientPolicyBinding {name} included a policy ref that does not target an HTTPClientPolicy!");
+            ensure!(policy_ref.targets_kind::<HttpClientPolicy>(), "ClientPolicyBinding {name} included a policy ref {policy_ref:?} that does not target an HTTPClientPolicy!");
             Ok(PolicyRef {
                 name: policy_ref.name,
                 namespace: policy_ref.namespace.unwrap_or_else(|| ns.clone()),

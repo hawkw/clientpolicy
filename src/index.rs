@@ -273,7 +273,38 @@ impl Index {
                             Cell::new(format!("`{:?}`", policy.filters)),
                         ]));
                     }
-                    println!("\n{svcs_by_addr}\n\n{policies}\n");
+
+                    let mut svcs = Table::new();
+                    svcs.load_preset(ASCII_MARKDOWN)
+                        .set_content_arrangement(ContentArrangement::Dynamic)
+                        .set_header(Row::from(vec![
+                            "SERVICE",
+                            "PORT NAME",
+                            "PORT NUMBER",
+                            "OPAQUE",
+                            "POLICY BINDINGS",
+                        ]));
+                    let services_by_ns = index.namespaces.iter().flat_map(|(ns_name, ns)| {
+                        ns.policies
+                            .services
+                            .iter()
+                            .map(move |(name, svc)| (ns_name, name, svc))
+                    });
+                    for (ns_name, svc_name, svc) in services_by_ns {
+                        let svc = svc.borrow();
+                        let svcname = format!("{ns_name}/{svc_name}");
+                        for (port_num, port_name) in svc.port_names.iter() {
+                            let policies = svc.client_policies.get(port_name);
+                            svcs.add_row(Row::from(vec![
+                                Cell::new(&svcname),
+                                Cell::new(&port_name),
+                                Cell::new(format!("{port_num}")),
+                                Cell::new(svc.opaque_ports.contains(port_num)),
+                                Cell::new(format!("{policies:?}")),
+                            ]));
+                        }
+                    }
+                    println!("\n{svcs_by_addr}\n\n{policies}\n\n{svcs}\n");
                 }
                 changed.notified().await;
             }
