@@ -7,7 +7,7 @@ use std::{
 
 /// Holds pod metadata
 #[derive(Debug, PartialEq)]
-pub(crate) struct Meta {
+pub struct Meta {
     /// The pod's labels. Used by `Server` pod selectors.
     pub labels: k8s::Labels,
 }

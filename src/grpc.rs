@@ -49,7 +49,7 @@ impl ClientPolicies for Server {
                 "invalid path {path:?}, not a socket address: {err}"
             ))
         })?;
-        let (svc_watch, pod_watch) = self
+        let (mut svc_watch, mut pod_watch) = self
             .index
             .lookup(addr, &context.ns, &context.pod)
             .map_err(|err| tonic::Status::not_found(err.to_string()))?;
