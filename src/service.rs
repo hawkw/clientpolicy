@@ -36,12 +36,6 @@ pub enum OutboundServiceRef {
     Default,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServicePort {
-    pub name: String,
-    pub opaque: bool,
-}
-
 const OPAQUE_PORTS_ANNOTATION: &str = "config.linkerd.io/opaque-ports";
 
 impl OutboundService {
@@ -102,6 +96,35 @@ impl OutboundService {
         svc.reindex_routes(&index.ns_or_default(ns).policies.http_routes);
         svc.reindex_policies(&index.client_policies);
         Ok(svc)
+    }
+
+    pub fn svc_policy_for(
+        &self,
+        port: NonZeroU16,
+        pod: &pod::Meta,
+    ) -> Option<&client_policy::Bound> {
+        let port_policies = match self.policies_for_port(port) {
+            None => {
+                tracing::debug!(port, "no policies target port");
+                return None;
+            }
+            Some(policies) => policies,
+        };
+
+        for policy in port_policies.bindings.values() {
+            if policy.client_pod_selector.matches(&pod.labels) {
+                tracing::debug!(?policy, ?pod, port, "found policy for pod");
+                return Some(policy);
+            }
+        }
+
+        tracing::debug!(port, ?pod, "no policies on this port are bound to this pod");
+        None
+    }
+
+    fn policies_for_port(&self, port: NonZeroU16) -> Option<&PolicySet> {
+        let port_name = self.port_names.get(&port)?;
+        self.client_policies.get(port_name)
     }
 
     pub fn reindex_policies(&mut self, index: &index::ClientPolicyNsIndex) -> bool {

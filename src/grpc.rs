@@ -21,7 +21,7 @@ use linkerd_policy_controller_core::{
     },
     InboundHttpRouteRef,
 };
-use std::net::SocketAddr;
+use std::{net::SocketAddr, num::NonZeroU16};
 
 #[derive(Clone, Debug)]
 pub struct Server {
@@ -67,11 +67,20 @@ impl ClientPolicies for Server {
             .index
             .lookup(addr, &context.ns, &context.pod)
             .map_err(|err| tonic::Status::not_found(err.to_string()))?;
+        let port = NonZeroU16::new(addr.port())
+            .ok_or_else(|| tonic::Status::invalid_argument("port must not be zero"))?;
         Ok(tonic::Response::new(Box::pin(async_stream::stream! {
+
             loop {
                 let update = {
                     let pod = pod_watch.borrow_and_update();
                     let svc = svc_watch.borrow_and_update();
+
+                    // is there a service-level policy for this port that's
+                    // bound to the client pod?
+                    let svc_policy = svc.svc_policy_for(port, &*pod);
+                    tracing::info!(?svc_policy);
+                    // TODO(eliza): do the same for route policies...
 
                     to_client_policy(&svc, &pod)
                 };
