@@ -1,4 +1,5 @@
-use linkerd_policy_controller_k8s_api::{labels, policy::NamespacedTargetRef};
+use super::NamespacedTargetRef;
+use linkerd_policy_controller_k8s_api::labels;
 
 #[derive(
     Clone, Debug, kube::CustomResource, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
