@@ -37,7 +37,7 @@ hyper = { version = "0.14", features = ["http2", "server", "tcp"] }
 linkerd2-proxy-api = { git = "https://github.com/linkerd/linkerd2-proxy-api.git", branch = "alex/client-policy", features = [
     "client-policy",
 ] }
-tonic = { version = "0.8", features = ["transport"]}
+tonic = { version = "0.8", features = ["transport"] }
 
 [dependencies.kube]
 version = "0.74"
@@ -54,6 +54,10 @@ git = "https://github.com/linkerd/linkerd2.git"
 rev = "b7387820c315bd769380267235cfaa69aeef269d"
 
 [dependencies.linkerd-policy-controller-core]
+git = "https://github.com/linkerd/linkerd2.git"
+rev = "b7387820c315bd769380267235cfaa69aeef269d"
+
+[dependencies.linkerd-policy-controller-grpc]
 git = "https://github.com/linkerd/linkerd2.git"
 rev = "b7387820c315bd769380267235cfaa69aeef269d"
 

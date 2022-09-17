@@ -956,8 +956,9 @@ dependencies = [
  "kube",
  "kubert",
  "linkerd-policy-controller-core",
+ "linkerd-policy-controller-grpc",
  "linkerd-policy-controller-k8s-api",
- "linkerd2-proxy-api",
+ "linkerd2-proxy-api 0.7.0 (git+https://github.com/linkerd/linkerd2-proxy-api.git?branch=alex/client-policy)",
  "parking_lot",
  "serde",
  "serde_json",
@@ -983,6 +984,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "linkerd-policy-controller-grpc"
+version = "0.1.0"
+source = "git+https://github.com/linkerd/linkerd2.git?rev=b7387820c315bd769380267235cfaa69aeef269d#b7387820c315bd769380267235cfaa69aeef269d"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "drain",
+ "futures",
+ "hyper",
+ "linkerd-policy-controller-core",
+ "linkerd2-proxy-api 0.7.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "maplit",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "linkerd-policy-controller-k8s-api"
 version = "0.1.0"
 source = "git+https://github.com/linkerd/linkerd2.git?rev=b7387820c315bd769380267235cfaa69aeef269d#b7387820c315bd769380267235cfaa69aeef269d"
@@ -998,6 +1017,20 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "linkerd2-proxy-api"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9461e1bf61263ffa493117f2177c15a470b4b66f6b58c74e548401293f9ea639"
+dependencies = [
+ "http",
+ "ipnet",
+ "prost",
+ "prost-types",
+ "thiserror",
+ "tonic",
 ]
 
 [[package]]
@@ -1031,6 +1064,12 @@ checksum = "abb12e687cfb44aa40f41fc3978ef76448f9b6038cad6aef4259d3c095a2382e"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "maplit"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e2e65a1a2e43cfcb47a895c4c8b10d1f4a61097f9f254f183aee60cad9c651d"
 
 [[package]]
 name = "matchers"
