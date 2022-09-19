@@ -62,7 +62,7 @@ impl ClientPolicies for Server {
                 "invalid path {path:?}, not a socket address: {err}"
             ))
         })?;
-        let (svc_watch, pod_watch) = self
+        let (mut svc_watch, mut pod_watch) = self
             .index
             .lookup(addr, &context.ns, &context.pod)
             .map_err(|err| tonic::Status::not_found(err.to_string()))?;
@@ -72,7 +72,7 @@ impl ClientPolicies for Server {
                     let pod = pod_watch.borrow_and_update();
                     let svc = svc_watch.borrow_and_update();
 
-                    to_client_policy(*svc)
+                    to_client_policy(&svc)
                 };
 
                 yield update;
@@ -87,15 +87,15 @@ impl ClientPolicies for Server {
     }
 }
 
-fn to_client_policy(svc: OutboundService) -> Result<proto::ClientPolicy, tonic::Status> {
+fn to_client_policy(svc: &OutboundService) -> Result<proto::ClientPolicy, tonic::Status> {
     let http_routes = svc
         .http_routes
-        .into_iter()
+        .iter()
         .map(|(route_ref, route)| to_http_route(&route_ref, route))
         .collect::<Result<_, _>>()?;
 
     Ok(proto::ClientPolicy {
-        fully_qualified_name: svc.fqdn.map(|s| s.to_string()).unwrap_or_default(),
+        fully_qualified_name: svc.fqdn.as_ref().map(|s| s.to_string()).unwrap_or_default(),
         endpoint: None,
         protocol: Some(ProxyProtocol {
             kind: Some(Kind::Detect(Detect {
@@ -103,7 +103,7 @@ fn to_client_policy(svc: OutboundService) -> Result<proto::ClientPolicy, tonic::
                 http_routes,
             })),
         }),
-        filters: to_filters(svc.client_policies)?,
+        filters: to_filters(&svc.client_policies)?,
     })
 }
 
@@ -114,7 +114,7 @@ fn to_http_route(
         client_policies,
         rules,
         creation_timestamp: _,
-    }: OutboundHttpRoute,
+    }: &OutboundHttpRoute,
 ) -> Result<proto::HttpRoute, tonic::Status> {
     let metadata = meta::Metadata {
         kind: Some(match reference {
@@ -131,7 +131,7 @@ fn to_http_route(
 
     let rules = rules
         .into_iter()
-        .map(|rule| convert_rule(client_policies, rule))
+        .map(|rule| convert_rule(&client_policies, rule))
         .collect::<Result<_, _>>()?;
 
     Ok(proto::HttpRoute {
@@ -141,10 +141,10 @@ fn to_http_route(
     })
 }
 
-fn convert_host_match(h: HostMatch) -> http_route::HostMatch {
+fn convert_host_match(h: &HostMatch) -> http_route::HostMatch {
     http_route::HostMatch {
         r#match: Some(match h {
-            HostMatch::Exact(host) => http_route::host_match::Match::Exact(host),
+            HostMatch::Exact(host) => http_route::host_match::Match::Exact(host.clone()),
             HostMatch::Suffix { reverse_labels } => {
                 http_route::host_match::Match::Suffix(http_route::host_match::Suffix {
                     reverse_labels: reverse_labels.to_vec(),
@@ -154,20 +154,20 @@ fn convert_host_match(h: HostMatch) -> http_route::HostMatch {
     }
 }
 
-fn to_filters(policies: PolicySet) -> Result<Vec<proto::Filter>, tonic::Status> {
+fn to_filters(policies: &PolicySet) -> Result<Vec<proto::Filter>, tonic::Status> {
     let filters = policies
         .policies
-        .into_values()
-        .flat_map(|spec| spec.filters)
+        .values()
+        .flat_map(|spec| &spec.filters)
         .map(convert_filter)
         .collect::<Result<_, _>>()?;
     Ok(filters)
 }
 
-fn convert_filter(filter: Filter) -> Result<proto::Filter, tonic::Status> {
+fn convert_filter(filter: &Filter) -> Result<proto::Filter, tonic::Status> {
     match filter {
         Filter::Timeout(t) => {
-            let t = t.try_into().map_err(|e| {
+            let t = t.clone().try_into().map_err(|e| {
                 tonic::Status::internal(format!("Failed to convert timeout duration: {}", e))
             })?;
 
@@ -184,7 +184,7 @@ fn convert_match(
         path,
         query_params,
         method,
-    }: HttpRouteMatch,
+    }: &HttpRouteMatch,
 ) -> http_route::HttpRouteMatch {
     let headers = headers
         .into_iter()
@@ -202,10 +202,10 @@ fn convert_match(
         })
         .collect();
 
-    let path = path.map(|path| http_route::PathMatch {
+    let path = path.as_ref().map(|path| http_route::PathMatch {
         kind: Some(match path {
-            PathMatch::Exact(path) => http_route::path_match::Kind::Exact(path),
-            PathMatch::Prefix(prefix) => http_route::path_match::Kind::Prefix(prefix),
+            PathMatch::Exact(path) => http_route::path_match::Kind::Exact(path.clone()),
+            PathMatch::Prefix(prefix) => http_route::path_match::Kind::Prefix(prefix.clone()),
             PathMatch::Regex(regex) => http_route::path_match::Kind::Regex(regex.to_string()),
         }),
     });
@@ -214,11 +214,11 @@ fn convert_match(
         .into_iter()
         .map(|qpm| match qpm {
             QueryParamMatch::Exact(name, value) => http_route::QueryParamMatch {
-                name,
-                value: Some(http_route::query_param_match::Value::Exact(value)),
+                name: name.clone(),
+                value: Some(http_route::query_param_match::Value::Exact(value.clone())),
             },
             QueryParamMatch::Regex(name, re) => http_route::QueryParamMatch {
-                name,
+                name: name.clone(),
                 value: Some(http_route::query_param_match::Value::Regex(re.to_string())),
             },
         })
@@ -228,16 +228,16 @@ fn convert_match(
         headers,
         path,
         query_params,
-        method: method.map(Into::into),
+        method: method.clone().map(Into::into),
     }
 }
 
 fn convert_rule(
-    client_policies: PolicySet,
-    InboundHttpRouteRule { matches, filters }: InboundHttpRouteRule,
+    client_policies: &PolicySet,
+    InboundHttpRouteRule { matches, filters }: &InboundHttpRouteRule,
 ) -> Result<proto::http_route::Rule, tonic::Status> {
     Ok(proto::http_route::Rule {
-        matches: matches.into_iter().map(convert_match).collect(),
+        matches: matches.iter().map(convert_match).collect(),
         filters: to_filters(client_policies)?,
     })
 }

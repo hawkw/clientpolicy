@@ -12,7 +12,10 @@ use client_policy_k8s_api::{
     client_policy::HttpClientPolicy, client_policy_binding::ClientPolicyBinding,
 };
 use futures::TryFutureExt;
-use k8s_openapi::api::core::v1::Service;
+use k8s_openapi::{
+    api::core::v1::{Pod, Service},
+    Metadata,
+};
 use kubert::client::api::ListParams;
 use parking_lot::RwLock;
 use std::{collections::hash_map::Entry, future::Future, net::SocketAddr, sync::Arc};
@@ -319,27 +322,37 @@ impl LockedIndex {
     }
 }
 
-impl kubert::index::IndexNamespacedResource<k8s::Pod> for LockedIndex {
-    fn apply(&mut self, pod: k8s::Pod) {
+impl kubert::index::IndexNamespacedResource<Pod> for LockedIndex {
+    fn apply(&mut self, pod: Pod) {
         let ns = pod.namespace().unwrap();
         let name = pod.name_unchecked();
         let _span = tracing::info_span!("apply", ns = %ns, %name).entered();
-        self.ns_or_default(ns)
-            .pods
-            .entry(name)
-            .insert(name, pod::Meta::from(pod.metadata()))
+        let pod = pod::Meta::from_metadata(pod.metadata);
+        match self.ns_or_default(ns).pods.entry(name) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().send_if_modified(|current| {
+                    if *current != pod {
+                        *current = pod;
+                        tracing::info!("pod updated");
+                        true
+                    } else {
+                        tracing::info!("no changes");
+                        false
+                    }
+                });
+            }
+            Entry::Vacant(entry) => {
+                let (pod, _) = watch::channel(pod);
+                entry.insert(pod);
+                tracing::info!("pod created");
+            }
+        }
     }
 
     #[tracing::instrument(name = "delete", fields(%ns, %name))]
     fn delete(&mut self, ns: String, name: String) {
         if let Entry::Occupied(mut ns) = self.namespaces.entry(ns) {
-            if let Some(pod) = ns.get_mut().pods.remove(&name) {
-                // if there was a pod, remove its ports from the index of
-                // servers by IP.
-                for addr in pod.addrs() {
-                    self.services_by_addr.remove(&addr);
-                }
-
+            if ns.get_mut().pods.remove(&name).is_some() {
                 // if there are no more pods in the ns, we can also delete the
                 // ns.
                 if ns.get().pods.is_empty() {
@@ -347,9 +360,7 @@ impl kubert::index::IndexNamespacedResource<k8s::Pod> for LockedIndex {
                     ns.remove();
                 }
             }
-            tracing::info!("pod deleted");
-
-            self.changed = Instant::now();
+            tracing::info!("pod deleted")
         } else {
             tracing::debug!("tried to delete a pod in a namespace that does not exist!");
         }
