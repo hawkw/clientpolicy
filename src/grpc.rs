@@ -1,6 +1,7 @@
 use crate::{
     client_policy::{Filter, PolicySet},
     index::Index,
+    pod::Meta,
     route::OutboundHttpRoute,
     service::OutboundService,
 };
@@ -72,7 +73,7 @@ impl ClientPolicies for Server {
                     let pod = pod_watch.borrow_and_update();
                     let svc = svc_watch.borrow_and_update();
 
-                    to_client_policy(&svc)
+                    to_client_policy(&svc, &pod)
                 };
 
                 yield update;
@@ -87,11 +88,14 @@ impl ClientPolicies for Server {
     }
 }
 
-fn to_client_policy(svc: &OutboundService) -> Result<proto::ClientPolicy, tonic::Status> {
+fn to_client_policy(
+    svc: &OutboundService,
+    pod: &Meta,
+) -> Result<proto::ClientPolicy, tonic::Status> {
     let http_routes = svc
         .http_routes
         .iter()
-        .map(|(route_ref, route)| to_http_route(&route_ref, route))
+        .map(|(route_ref, route)| to_http_route(route_ref, route, pod))
         .collect::<Result<_, _>>()?;
 
     Ok(proto::ClientPolicy {
@@ -103,7 +107,7 @@ fn to_client_policy(svc: &OutboundService) -> Result<proto::ClientPolicy, tonic:
                 http_routes,
             })),
         }),
-        filters: to_filters(&svc.client_policies)?,
+        filters: to_filters(&svc.client_policies, pod)?,
     })
 }
 
@@ -115,6 +119,7 @@ fn to_http_route(
         rules,
         creation_timestamp: _,
     }: &OutboundHttpRoute,
+    pod: &Meta,
 ) -> Result<proto::HttpRoute, tonic::Status> {
     let metadata = meta::Metadata {
         kind: Some(match reference {
@@ -130,8 +135,8 @@ fn to_http_route(
     let hosts = hostnames.into_iter().map(convert_host_match).collect();
 
     let rules = rules
-        .into_iter()
-        .map(|rule| convert_rule(&client_policies, rule))
+        .iter()
+        .map(|rule| convert_rule(client_policies, rule, pod))
         .collect::<Result<_, _>>()?;
 
     Ok(proto::HttpRoute {
@@ -154,11 +159,12 @@ fn convert_host_match(h: &HostMatch) -> http_route::HostMatch {
     }
 }
 
-fn to_filters(policies: &PolicySet) -> Result<Vec<proto::Filter>, tonic::Status> {
+fn to_filters(policies: &PolicySet, pod: &Meta) -> Result<Vec<proto::Filter>, tonic::Status> {
     let filters = policies
-        .policies
+        .bindings
         .values()
-        .flat_map(|spec| &spec.filters)
+        .filter(|binding| binding.client_pod_selector.matches(&pod.labels))
+        .flat_map(|binding| binding.policies.iter().flat_map(|spec| spec.filters.iter()))
         .map(convert_filter)
         .collect::<Result<_, _>>()?;
     Ok(filters)
@@ -167,7 +173,7 @@ fn to_filters(policies: &PolicySet) -> Result<Vec<proto::Filter>, tonic::Status>
 fn convert_filter(filter: &Filter) -> Result<proto::Filter, tonic::Status> {
     match filter {
         Filter::Timeout(t) => {
-            let t = t.clone().try_into().map_err(|e| {
+            let t = (*t).try_into().map_err(|e| {
                 tonic::Status::internal(format!("Failed to convert timeout duration: {}", e))
             })?;
 
@@ -187,7 +193,7 @@ fn convert_match(
     }: &HttpRouteMatch,
 ) -> http_route::HttpRouteMatch {
     let headers = headers
-        .into_iter()
+        .iter()
         .map(|hm| match hm {
             HeaderMatch::Exact(name, value) => http_route::HeaderMatch {
                 name: name.to_string(),
@@ -211,7 +217,7 @@ fn convert_match(
     });
 
     let query_params = query_params
-        .into_iter()
+        .iter()
         .map(|qpm| match qpm {
             QueryParamMatch::Exact(name, value) => http_route::QueryParamMatch {
                 name: name.clone(),
@@ -234,10 +240,14 @@ fn convert_match(
 
 fn convert_rule(
     client_policies: &PolicySet,
-    InboundHttpRouteRule { matches, filters }: &InboundHttpRouteRule,
+    InboundHttpRouteRule {
+        matches,
+        filters: _, // These are the inbound policy filters and we should ignore them.
+    }: &InboundHttpRouteRule,
+    pod: &Meta,
 ) -> Result<proto::http_route::Rule, tonic::Status> {
     Ok(proto::http_route::Rule {
         matches: matches.iter().map(convert_match).collect(),
-        filters: to_filters(client_policies)?,
+        filters: to_filters(client_policies, pod)?,
     })
 }
