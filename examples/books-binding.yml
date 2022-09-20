@@ -10,6 +10,6 @@ spec:
       namespace: booksapp
       name: books
   podSelector:
-    matchExpressions:
-      - { key: app, operator: NotIn, values: [] }
+    matchLabels:
+      app: books
 
