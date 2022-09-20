@@ -98,31 +98,7 @@ impl OutboundService {
         Ok(svc)
     }
 
-    pub fn svc_policy_for(
-        &self,
-        port: NonZeroU16,
-        pod: &pod::Meta,
-    ) -> Option<&client_policy::Bound> {
-        let port_policies = match self.policies_for_port(port) {
-            None => {
-                tracing::debug!(port, "no policies target port");
-                return None;
-            }
-            Some(policies) => policies,
-        };
-
-        for policy in port_policies.bindings.values() {
-            if policy.client_pod_selector.matches(&pod.labels) {
-                tracing::debug!(?policy, ?pod, port, "found policy for pod");
-                return Some(policy);
-            }
-        }
-
-        tracing::debug!(port, ?pod, "no policies on this port are bound to this pod");
-        None
-    }
-
-    fn policies_for_port(&self, port: NonZeroU16) -> Option<&PolicySet> {
+    pub fn policies_for_port(&self, port: NonZeroU16) -> Option<&PolicySet> {
         let port_name = self.port_names.get(&port)?;
         self.client_policies.get(port_name)
     }

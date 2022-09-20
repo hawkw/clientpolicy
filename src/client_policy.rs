@@ -1,6 +1,7 @@
 use crate::{
     core, index,
     k8s::{self, policy::HttpRoute},
+    pod,
 };
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use anyhow::{anyhow, ensure, Context, Error};
@@ -271,6 +272,15 @@ impl PolicySet {
         }
 
         changed
+    }
+
+    /// Returns the policies in this policy set that are bound to the given
+    /// `pod`.
+    pub fn policies_for<'a>(&'a self, pod: &'a pod::Meta) -> impl Iterator<Item = &Spec> + 'a {
+        self.bindings
+            .values()
+            .filter(move |binding| binding.client_pod_selector.matches(&pod.labels))
+            .flat_map(|binding| binding.policies.iter())
     }
 }
 

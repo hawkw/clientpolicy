@@ -30,7 +30,8 @@ serde = "1"
 serde_json = "1"
 thiserror = "1"
 tracing = "0.1"
-async-stream = "0.3"
+tracing-futures = { version = "0.2.5", features = ["futures-03", "std-future"] }
+async-stream = "0.3.3"
 async-trait = "0.1"
 drain = "0.1"
 hyper = { version = "0.14", features = ["http2", "server", "tcp"] }
