@@ -71,7 +71,7 @@ impl ClientPolicies for Server {
         let port = NonZeroU16::new(addr.port())
             .ok_or_else(|| tonic::Status::invalid_argument("port must not be zero"))?;
         let stream = async_stream::stream! {
-
+            tracing::debug!("started get_client_policy stream");
             loop {
                 let update = {
                     let pod = pod_watch.borrow_and_update();

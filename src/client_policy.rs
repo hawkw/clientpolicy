@@ -218,7 +218,7 @@ impl PolicySet {
         let mut changed = false;
         let mut unmatched_policies = self.policies.keys().cloned().collect::<HashSet<_>>();
         for (policy, spec) in index.policies_for(target) {
-            let _span = tracing::debug_span!("policy", policy.ns = %policy.namespace, message = %policy.name).entered();
+            let _span = tracing::debug_span!("policy", message = %policy).entered();
             unmatched_policies.remove(&policy);
             match self.policies.entry(policy) {
                 Entry::Occupied(mut entry) => {
@@ -244,7 +244,7 @@ impl PolicySet {
 
         let mut unmatched_bindings = self.bindings.keys().cloned().collect::<HashSet<_>>();
         for (binding, spec) in index.bindings_for(&self.policies) {
-            let _span = tracing::debug_span!("binding", binding.ns = %binding.namespace, message = %binding.name).entered();
+            let _span = tracing::debug_span!("binding", message = %binding).entered();
             unmatched_bindings.remove(&binding);
             match self.bindings.entry(binding) {
                 Entry::Occupied(mut entry) => {
@@ -263,7 +263,7 @@ impl PolicySet {
         }
 
         for binding in unmatched_bindings {
-            tracing::debug!(binding.ns = %binding.namespace, %binding.name, "removed policy binding");
+            tracing::debug!(%binding, "removed policy binding");
             self.bindings.remove(&binding);
             changed = true;
         }
@@ -279,9 +279,13 @@ impl PolicySet {
     /// `pod`.
     pub fn policies_for<'a>(&'a self, pod: &'a pod::Meta) -> impl Iterator<Item = &Spec> + 'a {
         self.bindings
-            .values()
-            .filter(move |binding| binding.client_pod_selector.matches(&pod.labels))
-            .flat_map(|binding| binding.policies.iter())
+            .iter()
+            .filter(move |(name, binding)| {
+                let matches = binding.client_pod_selector.matches(&pod.labels);
+                tracing::debug!(binding = %name, ?matches, ?pod.labels, ?binding.client_pod_selector);
+                matches
+            })
+            .flat_map(|(_, binding)| binding.policies.iter())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -299,5 +303,11 @@ impl fmt::Display for Target {
             } => write!(f, "Service {namespace}/{name}:{port}"),
             Target::HttpRoute { name, namespace } => write!(f, "HTTPRoute {namespace}/{name}"),
         }
+    }
+}
+
+impl fmt::Display for PolicyRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.namespace, self.name)
     }
 }
