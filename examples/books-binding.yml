@@ -3,6 +3,7 @@ apiVersion: policy.linkerd.io/v1alpha1
 kind: ClientPolicyBinding
 metadata:
   name: books
+  namespace: booksapp
 spec:
   policyRefs:
     - group: policy.linkerd.io
@@ -10,6 +11,6 @@ spec:
       namespace: booksapp
       name: books
   podSelector:
-    matchExpressions:
-      - { key: app, operator: NotIn, values: [] }
+    matchLabels:
+      project: booksapp
 

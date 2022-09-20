@@ -12,7 +12,7 @@ spec:
     - group: policy.linkerd.io
       kind: HTTPClientPolicy
       namespace: booksapp
-      name: authors-delete
+      name: authors-modify
     - group: policy.linkerd.io
       kind: HTTPClientPolicy
       namespace: booksapp

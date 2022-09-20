@@ -7,6 +7,7 @@ spec:
     name: books
     kind: Service
     namespace: booksapp
+    port: service
   failureClassification:
     statuses:
       - "401"

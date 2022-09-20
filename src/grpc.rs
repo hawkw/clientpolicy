@@ -21,7 +21,8 @@ use linkerd_policy_controller_core::{
     },
     InboundHttpRouteRef,
 };
-use std::net::SocketAddr;
+use std::{net::SocketAddr, num::NonZeroU16};
+use tracing_futures::Instrument;
 
 #[derive(Clone, Debug)]
 pub struct Server {
@@ -67,13 +68,18 @@ impl ClientPolicies for Server {
             .index
             .lookup(addr, &context.ns, &context.pod)
             .map_err(|err| tonic::Status::not_found(err.to_string()))?;
-        Ok(tonic::Response::new(Box::pin(async_stream::stream! {
+        let port = NonZeroU16::new(addr.port())
+            .ok_or_else(|| tonic::Status::invalid_argument("port must not be zero"))?;
+        let stream = async_stream::stream! {
+            tracing::debug!("started get_client_policy stream");
             loop {
                 let update = {
                     let pod = pod_watch.borrow_and_update();
                     let svc = svc_watch.borrow_and_update();
 
-                    to_client_policy(&svc, &pod)
+                    // TODO(eliza): do the same for route policies...
+
+                    to_client_policy(&svc, port, &pod)
                 };
 
                 yield update;
@@ -84,12 +90,16 @@ impl ClientPolicies for Server {
                     _ = pod_watch.changed() => {},
                 }
             }
-        })))
+        };
+        Ok(tonic::Response::new(Box::pin(stream.instrument(
+            tracing::debug_span!("get_client_policy", %addr, ?context.pod, ?context.ns),
+        ))))
     }
 }
 
 fn to_client_policy(
     svc: &OutboundService,
+    port: NonZeroU16,
     pod: &Meta,
 ) -> Result<proto::ClientPolicy, tonic::Status> {
     let http_routes = svc
@@ -97,6 +107,16 @@ fn to_client_policy(
         .iter()
         .map(|(route_ref, route)| to_http_route(route_ref, route, pod))
         .collect::<Result<_, _>>()?;
+
+    // is there a service-level policy for this port that's
+    // bound to the client pod?
+    let filters = match svc.policies_for_port(port) {
+        Some(policies) => to_filters(policies, pod)?,
+        None => {
+            tracing::debug!(port, "no client policies for this service target port");
+            Vec::new()
+        }
+    };
 
     Ok(proto::ClientPolicy {
         fully_qualified_name: svc.fqdn.as_ref().map(|s| s.to_string()).unwrap_or_default(),
@@ -107,7 +127,7 @@ fn to_client_policy(
                 http_routes,
             })),
         }),
-        filters: to_filters(&svc.client_policies, pod)?,
+        filters,
     })
 }
 
@@ -132,7 +152,7 @@ fn to_http_route(
         }),
     };
 
-    let hosts = hostnames.into_iter().map(convert_host_match).collect();
+    let hosts = hostnames.iter().map(convert_host_match).collect();
 
     let rules = rules
         .iter()
@@ -160,11 +180,11 @@ fn convert_host_match(h: &HostMatch) -> http_route::HostMatch {
 }
 
 fn to_filters(policies: &PolicySet, pod: &Meta) -> Result<Vec<proto::Filter>, tonic::Status> {
+    // TODO(eliza): also find route policies
+
     let filters = policies
-        .bindings
-        .values()
-        .filter(|binding| binding.client_pod_selector.matches(&pod.labels))
-        .flat_map(|binding| binding.policies.iter().flat_map(|spec| spec.filters.iter()))
+        .policies_for(pod)
+        .flat_map(|spec| spec.filters.iter())
         .map(convert_filter)
         .collect::<Result<_, _>>()?;
     Ok(filters)

@@ -1,6 +1,6 @@
 use crate::k8s;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     hash::{BuildHasherDefault, Hasher},
     num::NonZeroU16,
 };
@@ -30,7 +30,7 @@ pub(crate) type PortSet = HashSet<NonZeroU16, BuildHasherDefault<PortHasher>>;
 ///
 /// Because ports are `NonZeroU16` values, this type avoids the overhead of
 /// actually hashing ports.
-// pub(crate) type PortMap<V> = HashMap<NonZeroU16, V, BuildHasherDefault<PortHasher>>;
+pub(crate) type PortMap<V> = HashMap<NonZeroU16, V, BuildHasherDefault<PortHasher>>;
 
 /// A hasher for ports.
 ///

@@ -23,21 +23,17 @@ pub struct OutboundService {
     pub fqdn: Option<Arc<str>>,
     // pub protocol: ProxyProtocol,
     pub cluster_addrs: Vec<SocketAddr>,
-    pub ports: HashMap<String, ServicePort>,
+    pub(crate) port_names: pod::PortMap<Arc<str>>,
+    pub(crate) opaque_ports: pod::PortSet,
     pub http_routes: HashMap<core::InboundHttpRouteRef, OutboundHttpRoute>,
-    pub client_policies: PolicySet,
+    // client policies by port name
+    pub client_policies: HashMap<Arc<str>, PolicySet>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OutboundServiceRef {
     Service { name: String, ns: String },
     Default,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct ServicePort {
-    pub number: NonZeroU16,
-    pub opaque: bool,
 }
 
 const OPAQUE_PORTS_ANNOTATION: &str = "config.linkerd.io/opaque-ports";
@@ -58,32 +54,29 @@ impl OutboundService {
                 })
             })
             .unwrap_or_default();
-        let ports = spec
+        let port_names = spec
             .ports
             .ok_or_else(|| anyhow!("service does not have any ports"))?
             .into_iter()
             .map(|port| {
-                let name = port.name.unwrap_or_else(|| "default".to_string());
+                let name = port.name.unwrap_or_else(|| "default".to_string()).into();
                 let port = u16::try_from(port.port)
                     .map_err(anyhow::Error::from)
                     .and_then(|port| {
-                        let number = NonZeroU16::new(port)
-                            .ok_or_else(|| anyhow!("0 is not a valid port!"))?;
-                        let opaque = opaque_ports.contains(&number);
-                        Ok(ServicePort { number, opaque })
+                        NonZeroU16::new(port).ok_or_else(|| anyhow!("0 is not a valid port!"))
                     })
                     .with_context(|| format!("invalid port {name}"))?;
-                Ok((name, port))
+                Ok((port, name))
             })
-            .collect::<Result<HashMap<_, _>>>()?;
+            .collect::<Result<pod::PortMap<_>>>()?;
         let cluster_addrs = {
             let cluster_ip = spec
                 .cluster_ip
                 .ok_or_else(|| anyhow!("client policy not supported for headless services"))?
                 .parse::<IpAddr>()?;
-            ports
-                .values()
-                .map(|port| SocketAddr::new(cluster_ip, port.number.into()))
+            port_names
+                .keys()
+                .map(|&port| SocketAddr::new(cluster_ip, port.into()))
                 .collect()
         };
 
@@ -94,7 +87,8 @@ impl OutboundService {
                 ns: ns.clone(),
             },
             fqdn: Some(fqdn),
-            ports,
+            port_names,
+            opaque_ports,
             cluster_addrs,
             http_routes: Default::default(),
             client_policies: Default::default(),
@@ -102,6 +96,11 @@ impl OutboundService {
         svc.reindex_routes(&index.ns_or_default(ns).policies.http_routes);
         svc.reindex_policies(&index.client_policies);
         Ok(svc)
+    }
+
+    pub fn policies_for_port(&self, port: NonZeroU16) -> Option<&PolicySet> {
+        let port_name = self.port_names.get(&port)?;
+        self.client_policies.get(port_name)
     }
 
     pub fn reindex_policies(&mut self, index: &index::ClientPolicyNsIndex) -> bool {
@@ -112,20 +111,38 @@ impl OutboundService {
         )
         .entered();
 
-        let mut changed = self.client_policies.reindex(
-            client_policy::TargetRef::Service {
+        let mut changed = false;
+        for port in self.port_names.values() {
+            let _span = tracing::debug_span!("port", message = %port).entered();
+            let target = client_policy::TargetRef::Service {
                 name: self.reference.name(),
                 namespace,
-            },
-            index,
-        );
+                port,
+            };
+            match self.client_policies.entry(port.clone()) {
+                Entry::Occupied(mut policyset) => {
+                    changed |= policyset.get_mut().reindex(target, index);
+                }
+                Entry::Vacant(entry) => {
+                    let mut policies = PolicySet::default();
+                    policies.reindex(target, index);
+                    if !policies.is_empty() {
+                        tracing::debug!(?policies, "found new policies for port");
+                        entry.insert(policies);
+                        changed = true;
+                    } else {
+                        tracing::debug!("no policies target thisport");
+                    }
+                }
+            }
+        }
 
         for (route_ref, route) in self.http_routes.iter_mut() {
             let name = match route_ref {
                 core::InboundHttpRouteRef::Linkerd(ref name) => name.as_ref(),
                 core::InboundHttpRouteRef::Default(name) => *name,
             };
-            let _span = tracing::debug_span!("reindex_route_policies", message = %name).entered();
+            let _span = tracing::debug_span!("route", message = %name).entered();
             changed |= route.client_policies.reindex(
                 client_policy::TargetRef::HttpRoute { namespace, name },
                 index,

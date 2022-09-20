@@ -1,5 +1,4 @@
-use linkerd_policy_controller_k8s_api::policy::NamespacedTargetRef;
-
+use super::NamespacedTargetRef;
 #[derive(
     Clone, Debug, kube::CustomResource, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
 )]

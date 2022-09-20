@@ -8,6 +8,7 @@ spec:
     kind: HTTPRoute
     group: policy.linkerd.io
     namespace: booksapp
+    port: service
   failureClassification:
     statuses:
       - "401"
