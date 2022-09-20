@@ -23,5 +23,6 @@ in pkgs.mkShell {
     kube3d
     just
     docker
+    grpcurl
   ];
 }
