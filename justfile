@@ -75,7 +75,7 @@ install-linkerd: _install-cli
     {{ _l5d }} install  --crds | {{ _kubectl }} apply -f -
     {{ _l5d }} install | {{ _kubectl }} apply -f -
     @echo "disabling policy-controller validating webhook to allow HTTPRoutes to target Services"
-    {{ _kubectl }} kubectl delete validatingwebhookconfiguration \
+    {{ _kubectl }} delete validatingwebhookconfiguration \
         -n linkerd \
         linkerd-policy-validator-webhook-config
     {{ _l5d }} check
