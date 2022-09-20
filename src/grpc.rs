@@ -1,11 +1,25 @@
-use crate::index::Index;
+use crate::{
+    client_policy::{Filter, PolicySet},
+    index::Index,
+    pod::Meta,
+    route::OutboundHttpRoute,
+    service::OutboundService,
+};
 use futures::prelude::*;
 use linkerd2_proxy_api::{
     client_policy::{
         self as proto,
         client_policies_server::{ClientPolicies, ClientPoliciesServer},
+        proxy_protocol::{Detect, Kind},
+        ProxyProtocol,
     },
-    destination,
+    destination, http_route, meta,
+};
+use linkerd_policy_controller_core::{
+    http_route::{
+        HeaderMatch, HostMatch, HttpRouteMatch, InboundHttpRouteRule, PathMatch, QueryParamMatch,
+    },
+    InboundHttpRouteRef,
 };
 use std::net::SocketAddr;
 
@@ -56,12 +70,10 @@ impl ClientPolicies for Server {
         Ok(tonic::Response::new(Box::pin(async_stream::stream! {
             loop {
                 let update = {
-                    let pod = pod_watch.borrow();
-                    let svc = svc_watch.borrow();
+                    let pod = pod_watch.borrow_and_update();
+                    let svc = svc_watch.borrow_and_update();
 
-                    // TODO: actually translate the service watch + pod metadata
-                    // into a client policy (alex, wanna do this part?)
-                    Err(tonic::Status::unimplemented("todo"))
+                    to_client_policy(&svc, &pod)
                 };
 
                 yield update;
@@ -74,4 +86,168 @@ impl ClientPolicies for Server {
             }
         })))
     }
+}
+
+fn to_client_policy(
+    svc: &OutboundService,
+    pod: &Meta,
+) -> Result<proto::ClientPolicy, tonic::Status> {
+    let http_routes = svc
+        .http_routes
+        .iter()
+        .map(|(route_ref, route)| to_http_route(route_ref, route, pod))
+        .collect::<Result<_, _>>()?;
+
+    Ok(proto::ClientPolicy {
+        fully_qualified_name: svc.fqdn.as_ref().map(|s| s.to_string()).unwrap_or_default(),
+        endpoint: None,
+        protocol: Some(ProxyProtocol {
+            kind: Some(Kind::Detect(Detect {
+                timeout: Default::default(),
+                http_routes,
+            })),
+        }),
+        filters: to_filters(&svc.client_policies, pod)?,
+    })
+}
+
+fn to_http_route(
+    reference: &InboundHttpRouteRef,
+    OutboundHttpRoute {
+        hostnames,
+        client_policies,
+        rules,
+        creation_timestamp: _,
+    }: &OutboundHttpRoute,
+    pod: &Meta,
+) -> Result<proto::HttpRoute, tonic::Status> {
+    let metadata = meta::Metadata {
+        kind: Some(match reference {
+            InboundHttpRouteRef::Default(name) => meta::metadata::Kind::Default(name.to_string()),
+            InboundHttpRouteRef::Linkerd(name) => meta::metadata::Kind::Resource(meta::Resource {
+                group: "policy.linkerd.io".to_string(),
+                kind: "HTTPRoute".to_string(),
+                name: name.to_string(),
+            }),
+        }),
+    };
+
+    let hosts = hostnames.into_iter().map(convert_host_match).collect();
+
+    let rules = rules
+        .iter()
+        .map(|rule| convert_rule(client_policies, rule, pod))
+        .collect::<Result<_, _>>()?;
+
+    Ok(proto::HttpRoute {
+        metadata: Some(metadata),
+        hosts,
+        rules,
+    })
+}
+
+fn convert_host_match(h: &HostMatch) -> http_route::HostMatch {
+    http_route::HostMatch {
+        r#match: Some(match h {
+            HostMatch::Exact(host) => http_route::host_match::Match::Exact(host.clone()),
+            HostMatch::Suffix { reverse_labels } => {
+                http_route::host_match::Match::Suffix(http_route::host_match::Suffix {
+                    reverse_labels: reverse_labels.to_vec(),
+                })
+            }
+        }),
+    }
+}
+
+fn to_filters(policies: &PolicySet, pod: &Meta) -> Result<Vec<proto::Filter>, tonic::Status> {
+    let filters = policies
+        .bindings
+        .values()
+        .filter(|binding| binding.client_pod_selector.matches(&pod.labels))
+        .flat_map(|binding| binding.policies.iter().flat_map(|spec| spec.filters.iter()))
+        .map(convert_filter)
+        .collect::<Result<_, _>>()?;
+    Ok(filters)
+}
+
+fn convert_filter(filter: &Filter) -> Result<proto::Filter, tonic::Status> {
+    match filter {
+        Filter::Timeout(t) => {
+            let t = (*t).try_into().map_err(|e| {
+                tonic::Status::internal(format!("Failed to convert timeout duration: {}", e))
+            })?;
+
+            Ok(proto::Filter {
+                filter: Some(proto::filter::Filter::Timeout(t)),
+            })
+        }
+    }
+}
+
+fn convert_match(
+    HttpRouteMatch {
+        headers,
+        path,
+        query_params,
+        method,
+    }: &HttpRouteMatch,
+) -> http_route::HttpRouteMatch {
+    let headers = headers
+        .iter()
+        .map(|hm| match hm {
+            HeaderMatch::Exact(name, value) => http_route::HeaderMatch {
+                name: name.to_string(),
+                value: Some(http_route::header_match::Value::Exact(
+                    value.as_bytes().to_vec(),
+                )),
+            },
+            HeaderMatch::Regex(name, re) => http_route::HeaderMatch {
+                name: name.to_string(),
+                value: Some(http_route::header_match::Value::Regex(re.to_string())),
+            },
+        })
+        .collect();
+
+    let path = path.as_ref().map(|path| http_route::PathMatch {
+        kind: Some(match path {
+            PathMatch::Exact(path) => http_route::path_match::Kind::Exact(path.clone()),
+            PathMatch::Prefix(prefix) => http_route::path_match::Kind::Prefix(prefix.clone()),
+            PathMatch::Regex(regex) => http_route::path_match::Kind::Regex(regex.to_string()),
+        }),
+    });
+
+    let query_params = query_params
+        .iter()
+        .map(|qpm| match qpm {
+            QueryParamMatch::Exact(name, value) => http_route::QueryParamMatch {
+                name: name.clone(),
+                value: Some(http_route::query_param_match::Value::Exact(value.clone())),
+            },
+            QueryParamMatch::Regex(name, re) => http_route::QueryParamMatch {
+                name: name.clone(),
+                value: Some(http_route::query_param_match::Value::Regex(re.to_string())),
+            },
+        })
+        .collect();
+
+    http_route::HttpRouteMatch {
+        headers,
+        path,
+        query_params,
+        method: method.clone().map(Into::into),
+    }
+}
+
+fn convert_rule(
+    client_policies: &PolicySet,
+    InboundHttpRouteRule {
+        matches,
+        filters: _, // These are the inbound policy filters and we should ignore them.
+    }: &InboundHttpRouteRule,
+    pod: &Meta,
+) -> Result<proto::http_route::Rule, tonic::Status> {
+    Ok(proto::http_route::Rule {
+        matches: matches.iter().map(convert_match).collect(),
+        filters: to_filters(client_policies, pod)?,
+    })
 }

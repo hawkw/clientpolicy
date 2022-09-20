@@ -135,7 +135,7 @@ async fn main() -> Result<()> {
     // Run the Kubert indexers.
     rt.run().await?;
     indices.await?;
-    grpc.await?;
+    grpc.await??;
 
     Ok(())
 }
