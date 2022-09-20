@@ -23,11 +23,11 @@ pub struct OutboundService {
     pub fqdn: Option<Arc<str>>,
     // pub protocol: ProxyProtocol,
     pub cluster_addrs: Vec<SocketAddr>,
-    pub(crate) port_names: pod::PortMap<String>,
+    pub(crate) port_names: pod::PortMap<Arc<str>>,
     pub(crate) opaque_ports: pod::PortSet,
     pub http_routes: HashMap<core::InboundHttpRouteRef, OutboundHttpRoute>,
     // client policies by port name
-    pub client_policies: HashMap<String, PolicySet>,
+    pub client_policies: HashMap<Arc<str>, PolicySet>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,7 +59,7 @@ impl OutboundService {
             .ok_or_else(|| anyhow!("service does not have any ports"))?
             .into_iter()
             .map(|port| {
-                let name = port.name.unwrap_or_else(|| "default".to_string());
+                let name = port.name.unwrap_or_else(|| "default".to_string()).into();
                 let port = u16::try_from(port.port)
                     .map_err(anyhow::Error::from)
                     .and_then(|port| {
@@ -112,14 +112,29 @@ impl OutboundService {
         .entered();
 
         let mut changed = false;
-        for (port, policies) in self.client_policies.iter_mut() {
+        for port in self.port_names.values() {
             let _span = tracing::debug_span!("port", message = %port).entered();
             let target = client_policy::TargetRef::Service {
                 name: self.reference.name(),
                 namespace,
                 port,
             };
-            changed |= policies.reindex(target, index);
+            match self.client_policies.entry(port.clone()) {
+                Entry::Occupied(mut policyset) => {
+                    changed |= policyset.get_mut().reindex(target, index);
+                }
+                Entry::Vacant(entry) => {
+                    let mut policies = PolicySet::default();
+                    policies.reindex(target, index);
+                    if !policies.is_empty() {
+                        tracing::debug!(?policies, "found new policies for port");
+                        entry.insert(policies);
+                        changed = true;
+                    } else {
+                        tracing::debug!("no policies target thisport");
+                    }
+                }
+            }
         }
 
         for (route_ref, route) in self.http_routes.iter_mut() {

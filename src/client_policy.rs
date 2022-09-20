@@ -235,6 +235,7 @@ impl PolicySet {
                 }
             }
         }
+
         for policy in unmatched_policies {
             tracing::debug!(policy.ns = %policy.namespace, %policy.name, "removed policy");
             self.policies.remove(&policy);
@@ -281,6 +282,10 @@ impl PolicySet {
             .values()
             .filter(move |binding| binding.client_pod_selector.matches(&pod.labels))
             .flat_map(|binding| binding.policies.iter())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bindings.is_empty() && self.policies.is_empty()
     }
 }
 
